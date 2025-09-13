@@ -22,8 +22,13 @@ Automação completa para instalação, monitoramento e visualização de métri
 
 ## Requisitos
 
+<<<<<<< HEAD
+- **Debian 12 (Bookworm)** ou compatível
+- Acesso root (`su -`)
+=======
 - **Debian 12 (Bookworm)** ou compatível  
 - Acesso root (`su -`)  
+>>>>>>> 1199db1 (chore: sincroniza alterações locais (README e scripts))
 - Conexão com a internet (para baixar pacotes e plugins)
 
 ---
@@ -35,6 +40,8 @@ Clone o repositório:
 ```bash
 git clone https://github.com/FariasBGP/sentinela-dns.git
 cd sentinela-dns
+<<<<<<< HEAD
+=======
 ```
 
 Execute o instalador:
@@ -59,6 +66,24 @@ Acesse no navegador:
 ---
 
 ## Guia de uso do `make`
+
+O projeto vem com um **Makefile** que simplifica as tarefas mais comuns.  
+Todos os comandos podem ser executados com:
+
+```bash
+make <alvo>
+```
+
+ou, se você criou o alias sugerido:
+
+```bash
+alias sdn='cd ~/sentinela-dns && make'
+sdn <alvo>
+```
+
+---
+
+## Alvos disponíveis
 
 - **make preflight**  
   Executa o script de pré-checagem (dependências, versões, etc.).
@@ -119,7 +144,50 @@ make dashboard-export
 
 ---
 
+### Fluxo de trabalho com Git + Make
+
+1. **Atualizar o repositório local**
+   ```bash
+   git pull origin main
+   ```
+
+2. **Rodar instalação/atualização**
+   ```bash
+   make install
+   ```
+
+3. **Sincronizar dashboards**
+   ```bash
+   make grafana-sync
+   ```
+
+4. **Validar saúde**
+   ```bash
+   make health
+   ```
+
+5. **Versionar mudanças no repositório**
+   ```bash
+   git add <arquivo_modificado>
+   git commit -m "feat: descreva sua mudança"
+   git push origin main
+   ```
+
+---
+
+## Roadmap
+
+- [x] Instalação automática de toda a stack
+- [x] Dashboard inicial de Unbound
+- [x] Integração Makefile
+- [ ] `make dashboard-export` — export automático de dashboards do Grafana para o repositório
+- [ ] Alertas no Prometheus (falha de serviço, QPS alto, NXDOMAIN/ServFail excessivo)
+- [ ] Dashboards adicionais (latência, comparação entre instâncias, etc.)
+
+---
+
 ## Licença
 
 Este projeto está sob a licença **MIT**. Consulte o arquivo [LICENSE].
 
+>>>>>>> 1199db1 (chore: sincroniza alterações locais (README e scripts))

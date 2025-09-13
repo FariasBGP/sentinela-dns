@@ -2,11 +2,17 @@
 # Use: make install | make health | make grafana-sync | make status | ...
 
 SHELL := /bin/bash
+
+# Raiz do repo e caminhos
 REPO_ROOT := $(shell pwd)
-SCRIPTS := $(REPO_ROOT)/scripts
-DASH_SRC := $(REPO_ROOT)/grafana/provisioning/dashboards/unbound_overview.json
-DASH_DST_DIR := /var/lib/grafana/dashboards/unbound
-DASH_DST := $(DASH_DST_DIR)/unbound_overview.json
+SCRIPTS    := $(REPO_ROOT)/scripts
+
+# >>> Grafana (provisioning)
+DASH_SRC_DIR    := $(REPO_ROOT)/grafana/provisioning/dashboards
+GRAFANA_PROV_DIR:= /etc/grafana/provisioning/dashboards
+# (nomes padrão que vamos procurar, mas o alvo copia QUALQUER .json/.yaml no diretório)
+DASH_JSON       := $(DASH_SRC_DIR)/sentinela-unbound-main.json
+DASH_YAML       := $(DASH_SRC_DIR)/sentinela-unbound.yaml
 
 .PHONY: preflight install health grafana-sync prometheus-reload status logs fix clean
 
@@ -26,14 +32,22 @@ health:
 	@$(SCRIPTS)/health.sh
 
 grafana-sync:
-	@echo ">> Sincronizando dashboard para Grafana..."
-	@mkdir -p $(DASH_DST_DIR)
-	@if [ -f "$(DASH_SRC)" ]; then \
-	  cp -f "$(DASH_SRC)" "$(DASH_DST)"; \
+	@echo ">> Sincronizando dashboards (provisioning) para o Grafana..."
+	@if [ ! -d "$(DASH_SRC_DIR)" ]; then \
+	  echo "ERRO: diretório de origem não existe: $(DASH_SRC_DIR)"; exit 1; \
+	fi
+	@mkdir -p "$(GRAFANA_PROV_DIR)"
+	# Copia todos .json e .yaml (se existirem)
+	@if ls "$(DASH_SRC_DIR)"/*.json >/dev/null 2>&1 || ls "$(DASH_SRC_DIR)"/*.yaml >/dev/null 2>&1; then \
+	  cp -f $(DASH_SRC_DIR)/*.json "$(GRAFANA_PROV_DIR)" 2>/dev/null || true; \
+	  cp -f $(DASH_SRC_DIR)/*.yaml "$(GRAFANA_PROV_DIR)" 2>/dev/null || true; \
+	  chown -R grafana:grafana "$(GRAFANA_PROV_DIR)" || true; \
+	  chmod 0644 "$(GRAFANA_PROV_DIR)"/* || true; \
 	  systemctl restart grafana-server; \
-	  echo "OK: copiado $(DASH_SRC) -> $(DASH_DST) e reiniciado grafana-server"; \
+	  echo "OK: arquivos copiados para $(GRAFANA_PROV_DIR) e grafana-server reiniciado."; \
+	  echo "Dica: Grafana → Dashboards → Browse (pasta 'DNS/Unbound')."; \
 	else \
-	  echo "AVISO: dashboard não encontrado em $(DASH_SRC)"; \
+	  echo "AVISO: não encontrei .json/.yaml em $(DASH_SRC_DIR)"; \
 	fi
 
 prometheus-reload:

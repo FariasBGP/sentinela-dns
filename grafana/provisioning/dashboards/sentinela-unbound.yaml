@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: "Sentinela-DNS · Unbound"
+    orgId: 1
+    folder: "DNS/Unbound"
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    editable: true
+    updateIntervalSeconds: 10
+    options:
+      # Caminho no SERVIDOR (para onde o make grafana-sync vai copiar o JSON)
+      path: /etc/grafana/provisioning/dashboards/sentinela-unbound-main.json
