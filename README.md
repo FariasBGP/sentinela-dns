@@ -119,30 +119,6 @@ make dashboard-export
 
 ---
 
-### Fluxo de trabalho com Git + Make
-
-1. **Atualizar o repositório local**
-   ```bash
-   git pull origin main
-   ```
-
-2. **Rodar instalação/atualização**
-   ```bash
-   make install
-   ```
-
-3. **Sincronizar dashboards**
-   ```bash
-   make grafana-sync
-   ```
-
-4. **Validar saúde**
-   ```bash
-   make health
-   ```
-
----
-
 ## Licença
 
 Este projeto está sob a licença **MIT**. Consulte o arquivo [LICENSE].
