@@ -1,36 +1,185 @@
-# Sentinela-DNS 🛡️
+# Sentinela-DNS
 
-Automação para instalação e monitoramento do **Unbound DNS** com métricas no **Prometheus** e dashboards no **Grafana**.  
-Um verdadeiro sentinela para a sua infraestrutura DNS.
+Automação completa para instalação, monitoramento e visualização de métricas do **Unbound DNS** com **Prometheus** e **Grafana**.
 
-## Recursos
+---
 
-- Instalação automatizada do Unbound
-- Exporters para Prometheus:
-  - `node_exporter`
-  - `unbound_exporter`
-- Configuração de métricas no Unbound
-- Provisionamento opcional do Grafana com datasource Prometheus e dashboards
-- Snippets prontos para Prometheus externo
+## Recursos principais
 
-## Uso rápido (como root)
+- Instalação automática de:
+  - **Unbound** com métricas e hardening
+  - **unbound_exporter**
+  - **node_exporter**
+  - **Prometheus**
+  - **Grafana** (datasource Prometheus + dashboards provisionados)
+- Scripts auxiliares:
+  - `scripts/preflight.sh` → pré-checagem de dependências
+  - `scripts/install.sh`   → instalação full auto
+  - `scripts/health.sh`    → health-check de serviços, portas e endpoints
+- Dashboard inicial do Grafana para Unbound (`unbound_overview.json`), já integrado por provisionamento
+
+---
+
+## Requisitos
+
+- **Debian 12 (Bookworm)** ou compatível  
+- Acesso root (`su -`)  
+- Conexão com a internet (para baixar pacotes e plugins)
+
+---
+
+## Instalação rápida
+
+Clone o repositório:
 
 ```bash
-apt-get update -y
-apt-get install -y git
 git clone https://github.com/FariasBGP/sentinela-dns.git
 cd sentinela-dns
-chmod +x scripts/*.sh
+```
 
-# Pré-check
-sh scripts/preflight.sh          # apenas verifica
-sh scripts/preflight.sh --fix    # tenta corrigir pendências simples
+Execute o instalador:
 
-# Instalar (somente Unbound + exporters)
-sh scripts/install.sh
+```bash
+make install
+```
 
-# Com Grafana
-WITH_GRAFANA=yes sh scripts/install.sh
+Valide se tudo está ok:
 
-# Com Prometheus local
-WITH_PROM_LOCAL=yes sh scripts/install.sh
+```bash
+make health
+```
+
+Acesse no navegador:
+
+- **Grafana**: http://SEU_IP:3000 (usuário: `admin`, senha inicial: `admin`)
+- **Prometheus**: http://SEU_IP:9090
+- **Unbound exporter**: http://SEU_IP:9167/metrics
+- **Node exporter**: http://SEU_IP:9100/metrics
+
+---
+
+## Guia de uso do `make`
+
+O projeto vem com um **Makefile** que simplifica as tarefas mais comuns.  
+Todos os comandos podem ser executados com:
+
+```bash
+make <alvo>
+```
+
+ou, se você criou o alias sugerido:
+
+```bash
+alias sdn='cd ~/sentinela-dns && make'
+sdn <alvo>
+```
+
+---
+
+## Alvos disponíveis
+
+- **make preflight**  
+  Executa o script de pré-checagem (dependências, versões, etc.).
+
+- **make install**  
+  Roda o instalador full-auto (`scripts/install.sh`).
+
+- **make health**  
+  Executa o health check (`scripts/health.sh`).
+
+- **make grafana-sync**  
+  Copia o dashboard do repositório para o diretório do Grafana e reinicia.
+
+- **make prometheus-reload**  
+  Reinicia o Prometheus e lista os targets ativos.
+
+- **make status**  
+  Mostra status dos serviços principais + portas em uso.
+
+- **make logs**  
+  Exibe os últimos logs de Grafana, Prometheus e unbound_exporter.
+
+- **make fix**  
+  Tenta correções básicas (restart Grafana/Prometheus + health endpoints).
+
+- **make clean**  
+  Limpa caches APT (não remove pacotes instalados).
+
+- **make dashboard-export**  
+  *(em breve)* Exporta dashboards modificados no Grafana para o repositório.
+
+---
+
+## Exemplos de uso
+
+```bash
+# Instalar/atualizar toda a stack
+make install
+
+# Conferir se está tudo saudável
+make health
+
+# Sincronizar dashboard atualizado do Git → Grafana
+make grafana-sync
+
+# Reiniciar Prometheus e ver se os jobs estão "up"
+make prometheus-reload
+
+# Verificar status dos serviços
+make status
+
+# Consultar logs recentes
+make logs
+
+# (em breve) Exportar dashboards do Grafana para o repositório
+make dashboard-export
+```
+
+---
+
+### Fluxo de trabalho com Git + Make
+
+1. **Atualizar o repositório local**
+   ```bash
+   git pull origin main
+   ```
+
+2. **Rodar instalação/atualização**
+   ```bash
+   make install
+   ```
+
+3. **Sincronizar dashboards**
+   ```bash
+   make grafana-sync
+   ```
+
+4. **Validar saúde**
+   ```bash
+   make health
+   ```
+
+5. **Versionar mudanças no repositório**
+   ```bash
+   git add <arquivo_modificado>
+   git commit -m "feat: descreva sua mudança"
+   git push origin main
+   ```
+
+---
+
+## Roadmap
+
+- [x] Instalação automática de toda a stack
+- [x] Dashboard inicial de Unbound
+- [x] Integração Makefile
+- [ ] `make dashboard-export` — export automático de dashboards do Grafana para o repositório
+- [ ] Alertas no Prometheus (falha de serviço, QPS alto, NXDOMAIN/ServFail excessivo)
+- [ ] Dashboards adicionais (latência, comparação entre instâncias, etc.)
+
+---
+
+## Licença
+
+Este projeto está sob a licença **MIT**. Consulte o arquivo [LICENSE].
+
