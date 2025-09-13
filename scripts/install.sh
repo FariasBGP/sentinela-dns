@@ -4,54 +4,51 @@ set -euo pipefail
 # ==========================
 # Sentinela-DNS - instalador full auto (Debian 12 / amd64)
 # ==========================
-
+# Personalizáveis via env:
 UNBOUND_EXPORTER_VERSION="${UNBOUND_EXPORTER_VERSION:-0.4.5}"
-PROM_URL_DEFAULT="http://localhost:9090"
+PROM_URL="${PROM_URL:-http://localhost:9090}"         # datasource do Grafana
+GRAFANA_INSTALL="${GRAFANA_INSTALL:-yes}"             # yes|no
+PROM_INSTALL="${PROM_INSTALL:-yes}"                   # yes|no
+NODE_EXPORTER_INSTALL="${NODE_EXPORTER_INSTALL:-yes}" # yes|no
 
-# ---- helpers de log
-CLR_RESET="\033[0m"; CLR_OK="\033[32m"; CLR_WARN="\033[33m"; CLR_ERR="\033[31m"; CLR_INFO="\033[36m"
-ok(){   echo -e "${CLR_OK}✔$CLR_RESET $*"; }
-warn(){ echo -e "${CLR_WARN}▲$CLR_RESET $*"; }
-err(){  echo -e "${CLR_ERR}✖$CLR_RESET $*"; }
-inf(){  echo -e "${CLR_INFO}ℹ$CLR_RESET $*"; }
+DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND
 
-fail_count=0
-add_fail(){ err "$*"; fail_count=$((fail_count+1)); }
+# ---- helpers
+CLR_OK="\033[32m"; CLR_WARN="\033[33m"; CLR_ERR="\033[31m"; CLR_INFO="\033[36m"; CLR_RESET="\033[0m"
+ok(){   echo -e "${CLR_OK}✔${CLR_RESET} $*"; }
+warn(){ echo -e "${CLR_WARN}▲${CLR_RESET} $*"; }
+err(){  echo -e "${CLR_ERR}✖${CLR_RESET} $*"; }
+inf(){  echo -e "${CLR_INFO}ℹ${CLR_RESET} $*"; }
 
-require_root(){
-  if [[ $EUID -ne 0 ]]; then
-    err "Execute como root (su -)."; exit 1
-  fi
-}
+require_root(){ [[ $EUID -eq 0 ]] || { err "Execute como root (su -)."; exit 1; }; }
+backup_file(){ local f="$1"; [[ -f "$f" ]] && cp -a "$f" "${f}.bak.$(date +%F-%H%M%S)" || true; }
 
-# ==========================
-# Checagens iniciais
-# ==========================
 require_root
-ARCH="$(uname -m)"
-if [[ "$ARCH" != "x86_64" ]]; then
-  warn "Arquitetura '$ARCH' — script foi feito para amd64/x86_64. Continuando mesmo assim."
-fi
+
+# Descobre diretório do script e raiz do repositório
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ==========================
 # Atualização & pacotes base
 # ==========================
 inf "Atualizando sistema e instalando utilitários…"
-export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get dist-upgrade -y || true
-apt-get install -y \
-  curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https \
-  dnsutils iproute2 netcat-openbsd \
-  unbound prometheus-node-exporter || add_fail "Falha ao instalar pacotes base."
+apt-get install -y curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https dnsutils iproute2 netcat-openbsd
 
 # ==========================
-# Unbound - métricas & hardening
+# Unbound + métricas/hardening
 # ==========================
-inf "Configurando Unbound (métricas e hardening)…"
+inf "Instalando/ativando Unbound…"
+apt-get install -y unbound
 mkdir -p /etc/unbound/unbound.conf.d
 METRICS_CONF="/etc/unbound/unbound.conf.d/metrics.conf"
-cat > "$METRICS_CONF" <<'EOF'
+
+if [[ ! -f "$METRICS_CONF" ]]; then
+  inf "Criando $METRICS_CONF (métricas + hardening)…"
+  cat > "$METRICS_CONF" <<'EOF'
 server:
   extended-statistics: yes
   statistics-interval: 0
@@ -73,23 +70,28 @@ remote-control:
   control-enable: yes
   control-interface: 127.0.0.1
 EOF
+else
+  ok "Mantendo $METRICS_CONF existente."
+fi
 
-# Gera chaves do unbound-control se necessário
+# chaves do unbound-control (idempotente)
 if command -v unbound-control >/dev/null 2>&1; then
   unbound-control-setup >/dev/null 2>&1 || true
 fi
 systemctl enable unbound >/dev/null 2>&1 || true
-systemctl restart unbound || add_fail "Unbound não iniciou corretamente."
+systemctl restart unbound
+ok "Unbound ativo."
 
 # ==========================
-# Unbound Exporter (release)
+# unbound_exporter (release)
 # ==========================
 inf "Instalando unbound_exporter v${UNBOUND_EXPORTER_VERSION}…"
-tmpdir="$(mktemp -d)"; cd "$tmpdir"
+tmpdir="$(mktemp -d)"; pushd "$tmpdir" >/dev/null
 URL="https://github.com/kumina/unbound_exporter/releases/download/v${UNBOUND_EXPORTER_VERSION}/unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz"
 wget -q "$URL"
 tar xzf "unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz"
 install -m 0755 "unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64/unbound_exporter" /usr/local/bin/unbound_exporter
+popd >/dev/null
 
 cat > /etc/systemd/system/unbound_exporter.service <<'EOF'
 [Unit]
@@ -114,57 +116,95 @@ EOF
 
 systemctl daemon-reload
 systemctl enable unbound_exporter >/dev/null 2>&1 || true
-systemctl restart unbound_exporter || add_fail "unbound_exporter não iniciou."
+systemctl restart unbound_exporter
+ok "unbound_exporter ativo em :9167."
+
+# ==========================
+# node_exporter (via pacote)
+# ==========================
+if [[ "$NODE_EXPORTER_INSTALL" == "yes" ]]; then
+  inf "Instalando node_exporter (prometheus-node-exporter)…"
+  apt-get install -y prometheus-node-exporter
+  systemctl enable prometheus-node-exporter >/dev/null 2>&1 || true
+  systemctl restart prometheus-node-exporter
+  ok "node_exporter ativo em :9100."
+fi
 
 # ==========================
 # Prometheus (APT) + scrape jobs
 # ==========================
-inf "Instalando e configurando Prometheus…"
-apt-get install -y prometheus || add_fail "Falha ao instalar Prometheus."
-PROM_FILE="/etc/prometheus/prometheus.yml"
+if [[ "$PROM_INSTALL" == "yes" ]]; then
+  inf "Instalando/ajustando Prometheus…"
+  apt-get install -y prometheus
+  PROM_FILE="/etc/prometheus/prometheus.yml"
+  backup_file "$PROM_FILE"
 
-# Adiciona jobs se não existirem
-if ! grep -q "job_name: 'unbound'" "$PROM_FILE"; then
-  cat >> "$PROM_FILE" <<'EOF'
+  # Garante estrutura mínima
+  if ! grep -q "^scrape_configs:" "$PROM_FILE"; then
+    cat > "$PROM_FILE" <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+  fi
+
+  # adiciona jobs unbound & node se faltarem
+  grep -q "job_name: 'unbound'" "$PROM_FILE" || cat >> "$PROM_FILE" <<'EOF'
 
   - job_name: 'unbound'
     static_configs:
       - targets: ['localhost:9167']
+EOF
+
+  grep -q "job_name: 'node'" "$PROM_FILE" || cat >> "$PROM_FILE" <<'EOF'
 
   - job_name: 'node'
     static_configs:
       - targets: ['localhost:9100']
 EOF
+
+  # valida e sobe
+  if command -v promtool >/dev/null 2>&1; then
+    promtool check config "$PROM_FILE" || { err "prometheus.yml inválido"; exit 1; }
+  fi
+  systemctl enable prometheus >/dev/null 2>&1 || true
+  systemctl restart prometheus
+  ok "Prometheus ativo em :9090."
 fi
 
-systemctl enable prometheus >/dev/null 2>&1 || true
-systemctl restart prometheus || add_fail "Prometheus não iniciou."
-
 # ==========================
-# Grafana (repo oficial) + datasource
+# Grafana (repo oficial) + datasource + dashboard do repositório
 # ==========================
-inf "Instalando Grafana e provisionando datasource…"
-if [[ ! -f /etc/apt/sources.list.d/grafana.list ]]; then
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main" > /etc/apt/sources.list.d/grafana.list
-  apt-get update -y
-fi
-apt-get install -y grafana || add_fail "Falha ao instalar Grafana."
+if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
+  inf "Instalando Grafana + datasource Prometheus (${PROM_URL})…"
+  if [[ ! -f /etc/apt/sources.list.d/grafana.list ]]; then
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main" > /etc/apt/sources.list.d/grafana.list
+    apt-get update -y
+  fi
+  apt-get install -y grafana
 
-mkdir -p /etc/grafana/provisioning/datasources
-cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
+  # Datasource
+  mkdir -p /etc/grafana/provisioning/datasources
+  cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
 apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: ${PROM_URL_DEFAULT}
+    url: ${PROM_URL}
     isDefault: true
 EOF
 
-mkdir -p /var/lib/grafana/dashboards/unbound /etc/grafana/provisioning/dashboards
-cat > /etc/grafana/provisioning/dashboards/dashboards.yaml <<'EOF'
+  # Provisionamento de dashboards
+  mkdir -p /var/lib/grafana/dashboards/unbound /etc/grafana/provisioning/dashboards
+  cat > /etc/grafana/provisioning/dashboards/dashboards.yaml <<'EOF'
 apiVersion: 1
 providers:
   - name: 'Sentinela-DNS'
@@ -176,8 +216,16 @@ providers:
       path: /var/lib/grafana/dashboards/unbound
 EOF
 
-# placeholder de dashboard (você pode trocar depois)
-cat > /var/lib/grafana/dashboards/unbound/unbound_overview.json <<'EOF'
+  # Copia o dashboard do repositório, se existir
+  SRC_DASH="${REPO_ROOT}/grafana/provisioning/dashboards/unbound_overview.json"
+  DST_DASH="/var/lib/grafana/dashboards/unbound/unbound_overview.json"
+  if [[ -f "$SRC_DASH" ]]; then
+    cp -f "$SRC_DASH" "$DST_DASH"
+    ok "Dashboard copiado do repositório: $SRC_DASH -> $DST_DASH"
+  else
+    # Fallback: cria placeholder se ainda não existir
+    if [[ ! -f "$DST_DASH" ]]; then
+      cat > "$DST_DASH" <<'EOF'
 {
   "title": "Unbound Overview (Sentinela-DNS)",
   "timezone": "browser",
@@ -186,12 +234,17 @@ cat > /var/lib/grafana/dashboards/unbound/unbound_overview.json <<'EOF'
   "panels": []
 }
 EOF
+      warn "Dashboard do repo não encontrado; placeholder criado em $DST_DASH"
+    fi
+  fi
 
-systemctl enable grafana-server >/dev/null 2>&1 || true
-systemctl restart grafana-server || add_fail "Grafana não iniciou."
+  systemctl enable grafana-server >/dev/null 2>&1 || true
+  systemctl restart grafana-server
+  ok "Grafana ativo em :3000."
+fi
 
 # ==========================
-# Snippets de scrape para uso externo (extra)
+# Snippets Prometheus externo (extra)
 # ==========================
 cat > /root/SCRAPE_SNIPPETS.yml <<'EOF'
 - job_name: 'unbound'
@@ -204,47 +257,20 @@ cat > /root/SCRAPE_SNIPPETS.yml <<'EOF'
 EOF
 
 # ==========================
-# Health-checks finais
-# ==========================
-inf "Rodando checagens finais…"
-
-svc_check(){
-  local s="$1"
-  if systemctl is-active --quiet "$s"; then ok "Serviço ativo: $s"; else add_fail "Serviço INATIVO: $s"; fi
-}
-
-svc_check unbound
-svc_check prometheus
-svc_check grafana-server
-svc_check prometheus-node-exporter || svc_check node-exporter || true
-svc_check unbound_exporter
-
-probe_http(){
-  local url="$1" name="$2"
-  if curl -fsS --max-time 5 "$url" >/dev/null; then ok "Endpoint OK: $name ($url)"; else add_fail "Falha endpoint: $name ($url)"; fi
-}
-probe_http "http://localhost:9100/metrics" "node_exporter"
-probe_http "http://localhost:9167/metrics" "unbound_exporter"
-probe_http "http://localhost:9090/-/ready"  "Prometheus"
-probe_http "http://localhost:3000/api/health" "Grafana"
-
-# ==========================
-# Resumo & saídas úteis
+# Health-check final
 # ==========================
 echo
-echo "================== RESUMO =================="
-if (( fail_count == 0 )); then
-  ok "Instalação concluída com sucesso."
+inf "Executando checagens finais…"
+if [[ -x "${SCRIPT_DIR}/health.sh" ]]; then
+  "${SCRIPT_DIR}/health.sh" || true
 else
-  err "Instalação concluída com ${fail_count} alerta(s)/falha(s). Revise as mensagens acima."
+  for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
+    systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
+  done
 fi
 
 echo
-echo "Acessos locais:"
-echo "  Prometheus:  http://SEU_IP:9090"
-echo "  Grafana:     http://SEU_IP:3000   (usuário padrão: admin / senha inicial: admin)"
-echo "Exporters:"
-echo "  node_exporter:     http://SEU_IP:9100/metrics"
-echo "  unbound_exporter:  http://SEU_IP:9167/metrics"
-echo
-echo "Snippets Prometheus externo: /root/SCRAPE_SNIPPETS.yml"
+ok "Instalação/atualização concluída."
+echo "Prometheus:  ${PROM_URL}"
+echo "Grafana:     http://SEU_IP:3000  (admin/admin → altere a senha)"
+echo "Exporters:   node_exporter :9100 | unbound_exporter :9167"
