@@ -60,24 +60,6 @@ Acesse no navegador:
 
 ## Guia de uso do `make`
 
-O projeto vem com um **Makefile** que simplifica as tarefas mais comuns.  
-Todos os comandos podem ser executados com:
-
-```bash
-make <alvo>
-```
-
-ou, se você criou o alias sugerido:
-
-```bash
-alias sdn='cd ~/sentinela-dns && make'
-sdn <alvo>
-```
-
----
-
-## Alvos disponíveis
-
 - **make preflight**  
   Executa o script de pré-checagem (dependências, versões, etc.).
 
@@ -158,24 +140,6 @@ make dashboard-export
    ```bash
    make health
    ```
-
-5. **Versionar mudanças no repositório**
-   ```bash
-   git add <arquivo_modificado>
-   git commit -m "feat: descreva sua mudança"
-   git push origin main
-   ```
-
----
-
-## Roadmap
-
-- [x] Instalação automática de toda a stack
-- [x] Dashboard inicial de Unbound
-- [x] Integração Makefile
-- [ ] `make dashboard-export` — export automático de dashboards do Grafana para o repositório
-- [ ] Alertas no Prometheus (falha de serviço, QPS alto, NXDOMAIN/ServFail excessivo)
-- [ ] Dashboards adicionais (latência, comparação entre instâncias, etc.)
 
 ---
 
