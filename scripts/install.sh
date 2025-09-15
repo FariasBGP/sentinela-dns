@@ -83,8 +83,8 @@ EOF
 cat >/etc/unbound/unbound.conf.d/52-acls-trusteds.conf <<'EOF'
 server:
   # Coloque aqui faixas adicionais de clientes “trusted”, se precisar
-  # access-control: 201.131.152.0/22 allow
-  # access-control: 2804:194c::/32    allow
+  # access-control: 192.168.0.0/22 allow
+  # access-control: 2001:db8::/32    allow
 EOF
 
 cat >/etc/unbound/unbound.conf.d/59-acls-default-policy.conf <<'EOF'
