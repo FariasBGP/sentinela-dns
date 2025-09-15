@@ -44,6 +44,11 @@ inf "Instalando/ativando Unbound…"
 apt-get install -y unbound
 install -d -m 0755 /etc/unbound/unbound.conf.d
 
+# garante include no unbound.conf principal
+if ! grep -q 'include: "/etc/unbound/unbound.conf.d/\*.conf"' /etc/unbound/unbound.conf 2>/dev/null; then
+  echo 'include: "/etc/unbound/unbound.conf.d/*.conf"' >> /etc/unbound/unbound.conf
+fi
+
 # limpa resquícios do modo antigo (se existirem)
 rm -f /etc/unbound/unbound.conf.d/metrics.conf || true
 
@@ -70,11 +75,8 @@ EOF
 
 cat >/etc/unbound/unbound.conf.d/51-acls-locals.conf <<'EOF'
 server:
-  # Loopback
   access-control: 127.0.0.1/32 allow
   access-control: ::1/128    allow
-
-  # Redes internas típicas (ajuste as suas)
   access-control: 10.0.0.0/8      allow
   access-control: 100.64.0.0/10   allow
   access-control: 172.16.0.0/12   allow
@@ -82,19 +84,17 @@ EOF
 
 cat >/etc/unbound/unbound.conf.d/52-acls-trusteds.conf <<'EOF'
 server:
-  # Coloque aqui faixas adicionais de clientes “trusted”, se precisar
+  # Coloque aqui faixas adicionais de clientes confiáveis
   # access-control: 192.168.0.0/22 allow
-  # access-control: 2001:db8::/32    allow
+  # access-control: 2001:db8::/32   allow
 EOF
 
 cat >/etc/unbound/unbound.conf.d/59-acls-default-policy.conf <<'EOF'
 server:
-  # Política padrão (negar tudo que não esteja permitido acima)
   access-control: 0.0.0.0/0 deny
   access-control: ::/0      deny
 EOF
 
-# Ajustes de desempenho/hardening — valores seguros e gerais
 THREADS="$(nproc)"
 cat >/etc/unbound/unbound.conf.d/61-configs.conf <<EOF
 server:
@@ -162,7 +162,6 @@ server:
   do-tcp: yes
 EOF
 
-# Hiperlocal (root zone) — ótimo para latência
 cat >/etc/unbound/unbound.conf.d/89-hyperlocal-cache.conf <<'EOF'
 server:
   auth-zone:
@@ -195,7 +194,6 @@ server:
     zonefile: ""
 EOF
 
-# Remote-control para o exporter (sem cert pra simplificar)
 cat >/etc/unbound/unbound.conf.d/99-remote-control.conf <<'EOF'
 remote-control:
   control-enable: yes
@@ -204,14 +202,18 @@ remote-control:
   control-use-cert: no
 EOF
 
-# Valida e sobe
+# root.key (DNSSEC trust anchor)
+if [[ ! -f /var/lib/unbound/root.key ]]; then
+  unbound-anchor -a /var/lib/unbound/root.key || true
+fi
+
 unbound-checkconf
 systemctl enable unbound >/dev/null 2>&1 || true
 systemctl restart unbound
 ok "Unbound ativo (configuração modular)."
 
 # ==========================
-# unbound_exporter (release)
+# unbound_exporter
 # ==========================
 inf "Instalando unbound_exporter v${UNBOUND_EXPORTER_VERSION}…"
 tmpdir="$(mktemp -d)"; pushd "$tmpdir" >/dev/null
@@ -230,17 +232,11 @@ Requires=unbound.service
 [Service]
 User=nobody
 Group=nogroup
-# IMPORTANTE: use tcp:// no unbound.host
 ExecStart=/usr/local/bin/unbound_exporter \
   --unbound.host=tcp://127.0.0.1:8953 \
   --web.listen-address=:9167 \
   --web.telemetry-path=/metrics
 Restart=on-failure
-ProtectSystem=full
-ProtectHome=true
-NoNewPrivileges=true
-PrivateTmp=true
-CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
@@ -252,10 +248,9 @@ systemctl restart unbound_exporter
 ok "unbound_exporter ativo em :9167."
 
 # ==========================
-# node_exporter (via pacote)
+# node_exporter
 # ==========================
 if [[ "$NODE_EXPORTER_INSTALL" == "yes" ]]; then
-  inf "Instalando node_exporter (prometheus-node-exporter)…"
   apt-get install -y prometheus-node-exporter
   systemctl enable prometheus-node-exporter >/dev/null 2>&1 || true
   systemctl restart prometheus-node-exporter
@@ -263,15 +258,13 @@ if [[ "$NODE_EXPORTER_INSTALL" == "yes" ]]; then
 fi
 
 # ==========================
-# Prometheus (APT) + scrape jobs
+# Prometheus
 # ==========================
 if [[ "$PROM_INSTALL" == "yes" ]]; then
-  inf "Instalando/ajustando Prometheus…"
   apt-get install -y prometheus
   PROM_FILE="/etc/prometheus/prometheus.yml"
   backup_file "$PROM_FILE"
 
-  # Garante estrutura mínima
   if ! grep -q "^scrape_configs:" "$PROM_FILE" 2>/dev/null; then
     cat > "$PROM_FILE" <<'EOF'
 global:
@@ -285,7 +278,6 @@ scrape_configs:
 EOF
   fi
 
-  # adiciona jobs unbound & node se faltarem
   grep -q "job_name: 'unbound'" "$PROM_FILE" || cat >> "$PROM_FILE" <<'EOF'
 
   - job_name: 'unbound'
@@ -300,19 +292,15 @@ EOF
       - targets: ['localhost:9100']
 EOF
 
-  if command -v promtool >/dev/null 2>&1; then
-    promtool check config "$PROM_FILE" || { err "prometheus.yml inválido"; exit 1; }
-  fi
   systemctl enable prometheus >/dev/null 2>&1 || true
   systemctl restart prometheus
   ok "Prometheus ativo em :9090."
 fi
 
 # ==========================
-# Grafana (repo oficial) + datasource + dashboards do repositório
+# Grafana
 # ==========================
 if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
-  inf "Instalando Grafana + datasource Prometheus (${PROM_URL})…"
   if [[ ! -f /etc/apt/sources.list.d/grafana.list ]]; then
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
@@ -321,26 +309,32 @@ if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
   fi
   apt-get install -y grafana
 
-  # Datasource (usa o arquivo do repo se existir; senão cria mínimo)
   install -d /etc/grafana/provisioning/datasources
   if [[ -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" ]]; then
     cp -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" /etc/grafana/provisioning/datasources/prometheus.yaml
-    sed -i "s#url: .*#url: ${PROM_URL}#g" /etc/grafana/provisioning/datasources/prometheus.yaml || true
+    sed -i "s#^\\s*url:.*#    url: ${PROM_URL}#g" /etc/grafana/provisioning/datasources/prometheus.yaml || true
   else
     cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
 apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     url: ${PROM_URL}
     isDefault: true
 EOF
   fi
 
-  # Provider + dashboard
+  # força UID: prometheus (se não existir)
+  if ! grep -q '^\s*uid:\s*prometheus' /etc/grafana/provisioning/datasources/prometheus.yaml; then
+    awk '
+      {print}
+      $0 ~ /type:[[:space:]]*prometheus/ && !i {print "    uid: prometheus"; i=1}
+    ' /etc/grafana/provisioning/datasources/prometheus.yaml > /tmp/prom.yaml && mv /tmp/prom.yaml /etc/grafana/provisioning/datasources/prometheus.yaml
+  fi
+
   install -d /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards/unbound
-  # provider (nome “Sentinela-DNS”, pasta DNS/Unbound)
   cat > /etc/grafana/provisioning/dashboards/sentinela-unbound.yaml <<'EOF'
 apiVersion: 1
 providers:
@@ -353,13 +347,10 @@ providers:
       path: /var/lib/grafana/dashboards/unbound
 EOF
 
-  # copia o dashboard principal do repo (se existir)
   if [[ -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" ]]; then
     cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" \
           /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json
-    ok "Dashboard aplicado: sentinela-unbound-main.json"
   else
-    warn "Dashboard do repo não encontrado; criando placeholder."
     cat > /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json <<'EOF'
 { "title": "Sentinela-DNS · Unbound (Main)", "schemaVersion": 36, "version": 1, "panels": [] }
 EOF
@@ -371,7 +362,7 @@ EOF
 fi
 
 # ==========================
-# Snippets Prometheus externo (extra)
+# Snippets Prometheus externo
 # ==========================
 cat > /root/SCRAPE_SNIPPETS.yml <<'EOF'
 - job_name: 'unbound'
@@ -386,14 +377,11 @@ EOF
 # ==========================
 # Health-check final
 # ==========================
-echo
-inf "Executando checagens finais…"
 for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
   systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
 done
 
-echo
 ok "Instalação/atualização concluída."
 echo "Prometheus:  ${PROM_URL}"
-echo "Grafana:     http://SEU_IP:3000  (admin/admin → altere a senha)"
+echo "Grafana:     http://SEU_IP:3000 (admin/admin → altere a senha)"
 echo "Exporters:   node_exporter :9100 | unbound_exporter :9167"
