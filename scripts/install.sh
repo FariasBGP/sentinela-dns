@@ -213,16 +213,44 @@ systemctl restart unbound
 ok "Unbound ativo (configuração modular)."
 
 # ==========================
-# unbound_exporter
+# unbound_exporter (download se existir; fallback: compilar do source)
 # ==========================
-inf "Instalando unbound_exporter v${UNBOUND_EXPORTER_VERSION}…"
+inf "Instalando unbound_exporter…"
+VER="${UNBOUND_EXPORTER_VERSION:-0.4.6}"
+set -x
 tmpdir="$(mktemp -d)"; pushd "$tmpdir" >/dev/null
-URL="https://github.com/kumina/unbound_exporter/releases/download/v${UNBOUND_EXPORTER_VERSION}/unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz"
-wget -q "$URL"
-tar xzf "unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz"
-install -m 0755 "unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64/unbound_exporter" /usr/local/bin/unbound_exporter
-popd >/dev/null
 
+ok_dl=0
+# Tentativa 1: baixar tarball (se algum dos projetos voltar a publicar assets)
+for URL in \
+  "https://github.com/letsencrypt/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz" \
+  "https://github.com/kumina/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz"
+do
+  if curl -fL --connect-timeout 10 -o unbound_exporter.tar.gz "$URL"; then
+    if tar -tzf unbound_exporter.tar.gz >/dev/null 2>&1; then
+      tar -xzf unbound_exporter.tar.gz
+      # procura o binário onde quer que esteja
+      BIN="$(find . -type f -name unbound_exporter -perm -u+x | head -n1 || true)"
+      if [[ -n "$BIN" ]]; then
+        install -m0755 "$BIN" /usr/local/bin/unbound_exporter
+        ok_dl=1
+        break
+      fi
+    fi
+  fi
+done
+
+# Tentativa 2: compilar do source (caminho robusto)
+if [[ "$ok_dl" -ne 1 ]]; then
+  inf "Tarball não disponível; compilando do source (Go)…"
+  apt-get install -y golang
+  GO111MODULE=on GOBIN=/usr/local/bin go install "github.com/letsencrypt/unbound_exporter@v${VER}"
+fi
+
+popd >/dev/null
+set +x
+
+# Service systemd (idempotente)
 cat > /etc/systemd/system/unbound_exporter.service <<'EOF'
 [Unit]
 Description=Prometheus Unbound Exporter
