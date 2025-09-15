@@ -4,7 +4,6 @@ set -euo pipefail
 # ==========================
 # Sentinela-DNS - instalador full auto (Debian 12 / amd64)
 # ==========================
-# Personalizáveis via env:
 UNBOUND_EXPORTER_VERSION="${UNBOUND_EXPORTER_VERSION:-0.4.5}"
 PROM_URL="${PROM_URL:-http://localhost:9090}"         # datasource do Grafana
 GRAFANA_INSTALL="${GRAFANA_INSTALL:-yes}"             # yes|no
@@ -39,48 +38,177 @@ apt-get dist-upgrade -y || true
 apt-get install -y curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https dnsutils iproute2 netcat-openbsd
 
 # ==========================
-# Unbound + métricas/hardening
+# Unbound - configuração MODULAR (unbound.conf.d)
 # ==========================
 inf "Instalando/ativando Unbound…"
 apt-get install -y unbound
-mkdir -p /etc/unbound/unbound.conf.d
-METRICS_CONF="/etc/unbound/unbound.conf.d/metrics.conf"
+install -d -m 0755 /etc/unbound/unbound.conf.d
 
-if [[ ! -f "$METRICS_CONF" ]]; then
-  inf "Criando $METRICS_CONF (métricas + hardening)…"
-  cat > "$METRICS_CONF" <<'EOF'
+# limpa resquícios do modo antigo (se existirem)
+rm -f /etc/unbound/unbound.conf.d/metrics.conf || true
+
+# ---- Fragments (idempotentes)
+cat >/etc/unbound/unbound.conf.d/21-root-auto-trust-anchor-file.conf <<'EOF'
 server:
-  extended-statistics: yes
+  auto-trust-anchor-file: "/var/lib/unbound/root.key"
+EOF
+
+cat >/etc/unbound/unbound.conf.d/31-statisticas.conf <<'EOF'
+server:
   statistics-interval: 0
+  extended-statistics: yes
   statistics-cumulative: yes
-  prefetch: yes
-  prefetch-key: yes
-  qname-minimisation: yes
-  harden-dnssec-stripped: yes
+EOF
+
+cat >/etc/unbound/unbound.conf.d/41-protocols.conf <<'EOF'
+server:
   do-ip4: yes
-  do-ip6: no
+  do-ip6: yes
   do-udp: yes
   do-tcp: yes
-  serve-expired: yes
-  serve-expired-ttl: 86400
-  cache-min-ttl: 60
-  cache-max-ttl: 86400
+EOF
 
+cat >/etc/unbound/unbound.conf.d/51-acls-locals.conf <<'EOF'
+server:
+  # Loopback
+  access-control: 127.0.0.1/32 allow
+  access-control: ::1/128    allow
+
+  # Redes internas típicas (ajuste as suas)
+  access-control: 10.0.0.0/8      allow
+  access-control: 100.64.0.0/10   allow
+  access-control: 172.16.0.0/12   allow
+EOF
+
+cat >/etc/unbound/unbound.conf.d/52-acls-trusteds.conf <<'EOF'
+server:
+  # Coloque aqui faixas adicionais de clientes “trusted”, se precisar
+  # access-control: 201.131.152.0/22 allow
+  # access-control: 2804:194c::/32    allow
+EOF
+
+cat >/etc/unbound/unbound.conf.d/59-acls-default-policy.conf <<'EOF'
+server:
+  # Política padrão (negar tudo que não esteja permitido acima)
+  access-control: 0.0.0.0/0 deny
+  access-control: ::/0      deny
+EOF
+
+# Ajustes de desempenho/hardening — valores seguros e gerais
+THREADS="$(nproc)"
+cat >/etc/unbound/unbound.conf.d/61-configs.conf <<EOF
+server:
+  outgoing-range: 8192
+  outgoing-port-avoid: 0-1024
+  outgoing-port-permit: 1025-65535
+
+  num-threads: ${THREADS}
+  num-queries-per-thread: 2048
+
+  msg-cache-size: 64m
+  msg-cache-slabs: ${THREADS}
+  rrset-cache-size: 128m
+  rrset-cache-slabs: ${THREADS}
+
+  infra-host-ttl: 60
+  infra-lame-ttl: 120
+  infra-cache-numhosts: 10000
+  infra-cache-lame-size: 10k
+  infra-cache-slabs: ${THREADS}
+  key-cache-slabs: ${THREADS}
+  rrset-roundrobin: yes
+
+  hide-identity: yes
+  hide-version: yes
+  harden-glue: yes
+  harden-algo-downgrade: yes
+  harden-below-nxdomain: yes
+  harden-dnssec-stripped: yes
+  harden-large-queries: yes
+  harden-referral-path: no
+  harden-short-bufsize: yes
+
+  do-not-query-address: 127.0.0.1/8
+  do-not-query-localhost: yes
+  edns-buffer-size: 1472
+  aggressive-nsec: yes
+  delay-close: 10000
+  neg-cache-size: 8M
+  qname-minimisation: yes
+  deny-any: yes
+  ratelimit: 2000
+  unwanted-reply-threshold: 10000
+  use-caps-for-id: yes
+  val-clean-additional: yes
+  minimal-responses: yes
+  prefetch: yes
+  prefetch-key: yes
+  serve-expired: yes
+  so-reuseport: yes
+EOF
+
+cat >/etc/unbound/unbound.conf.d/62-listen-loopback.conf <<'EOF'
+server:
+  interface: 127.0.0.1
+  interface: ::1
+EOF
+
+cat >/etc/unbound/unbound.conf.d/63-listen-interfaces.conf <<'EOF'
+server:
+  interface: 0.0.0.0
+  interface: ::
+  port: 53
+  do-udp: yes
+  do-tcp: yes
+EOF
+
+# Hiperlocal (root zone) — ótimo para latência
+cat >/etc/unbound/unbound.conf.d/89-hyperlocal-cache.conf <<'EOF'
+server:
+  auth-zone:
+    name: "."
+    master: 198.41.0.4
+    master: 2001:503:ba3e::2:30
+    master: 192.33.4.12
+    master: 2001:500:2::c
+    master: 199.7.91.13
+    master: 2001:500:2d::d
+    master: 192.203.230.10
+    master: 2001:500:a8::e
+    master: 192.5.5.241
+    master: 2001:500:2f::f
+    master: 192.112.36.4
+    master: 2001:500:12::d0d
+    master: 192.36.148.17
+    master: 2001:7fe::53
+    master: 192.58.128.30
+    master: 2001:503:c27::2:30
+    master: 193.0.14.129
+    master: 2001:7fd::1
+    master: 199.7.83.42
+    master: 2001:500:9f::42
+    master: 202.12.27.33
+    master: 2001:dc3::35
+    fallback-enabled: yes
+    for-downstream: no
+    for-upstream: yes
+    zonefile: ""
+EOF
+
+# Remote-control para o exporter (sem cert pra simplificar)
+cat >/etc/unbound/unbound.conf.d/99-remote-control.conf <<'EOF'
 remote-control:
   control-enable: yes
   control-interface: 127.0.0.1
+  control-port: 8953
+  control-use-cert: no
 EOF
-else
-  ok "Mantendo $METRICS_CONF existente."
-fi
 
-# chaves do unbound-control (idempotente)
-if command -v unbound-control >/dev/null 2>&1; then
-  unbound-control-setup >/dev/null 2>&1 || true
-fi
+# Valida e sobe
+unbound-checkconf
 systemctl enable unbound >/dev/null 2>&1 || true
 systemctl restart unbound
-ok "Unbound ativo."
+ok "Unbound ativo (configuração modular)."
 
 # ==========================
 # unbound_exporter (release)
@@ -102,7 +230,11 @@ Requires=unbound.service
 [Service]
 User=nobody
 Group=nogroup
-ExecStart=/usr/local/bin/unbound_exporter --unbound.host=127.0.0.1:8953 --web.listen-address=:9167
+# IMPORTANTE: use tcp:// no unbound.host
+ExecStart=/usr/local/bin/unbound_exporter \
+  --unbound.host=tcp://127.0.0.1:8953 \
+  --web.listen-address=:9167 \
+  --web.telemetry-path=/metrics
 Restart=on-failure
 ProtectSystem=full
 ProtectHome=true
@@ -140,7 +272,7 @@ if [[ "$PROM_INSTALL" == "yes" ]]; then
   backup_file "$PROM_FILE"
 
   # Garante estrutura mínima
-  if ! grep -q "^scrape_configs:" "$PROM_FILE"; then
+  if ! grep -q "^scrape_configs:" "$PROM_FILE" 2>/dev/null; then
     cat > "$PROM_FILE" <<'EOF'
 global:
   scrape_interval: 15s
@@ -168,7 +300,6 @@ EOF
       - targets: ['localhost:9100']
 EOF
 
-  # valida e sobe
   if command -v promtool >/dev/null 2>&1; then
     promtool check config "$PROM_FILE" || { err "prometheus.yml inválido"; exit 1; }
   fi
@@ -178,7 +309,7 @@ EOF
 fi
 
 # ==========================
-# Grafana (repo oficial) + datasource + dashboard do repositório
+# Grafana (repo oficial) + datasource + dashboards do repositório
 # ==========================
 if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
   inf "Instalando Grafana + datasource Prometheus (${PROM_URL})…"
@@ -190,9 +321,13 @@ if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
   fi
   apt-get install -y grafana
 
-  # Datasource
-  mkdir -p /etc/grafana/provisioning/datasources
-  cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
+  # Datasource (usa o arquivo do repo se existir; senão cria mínimo)
+  install -d /etc/grafana/provisioning/datasources
+  if [[ -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" ]]; then
+    cp -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" /etc/grafana/provisioning/datasources/prometheus.yaml
+    sed -i "s#url: .*#url: ${PROM_URL}#g" /etc/grafana/provisioning/datasources/prometheus.yaml || true
+  else
+    cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
 apiVersion: 1
 datasources:
   - name: Prometheus
@@ -201,10 +336,12 @@ datasources:
     url: ${PROM_URL}
     isDefault: true
 EOF
+  fi
 
-  # Provisionamento de dashboards
-  mkdir -p /var/lib/grafana/dashboards/unbound /etc/grafana/provisioning/dashboards
-  cat > /etc/grafana/provisioning/dashboards/dashboards.yaml <<'EOF'
+  # Provider + dashboard
+  install -d /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards/unbound
+  # provider (nome “Sentinela-DNS”, pasta DNS/Unbound)
+  cat > /etc/grafana/provisioning/dashboards/sentinela-unbound.yaml <<'EOF'
 apiVersion: 1
 providers:
   - name: 'Sentinela-DNS'
@@ -216,26 +353,16 @@ providers:
       path: /var/lib/grafana/dashboards/unbound
 EOF
 
-  # Copia o dashboard do repositório, se existir
-  SRC_DASH="${REPO_ROOT}/grafana/provisioning/dashboards/unbound_overview.json"
-  DST_DASH="/var/lib/grafana/dashboards/unbound/unbound_overview.json"
-  if [[ -f "$SRC_DASH" ]]; then
-    cp -f "$SRC_DASH" "$DST_DASH"
-    ok "Dashboard copiado do repositório: $SRC_DASH -> $DST_DASH"
+  # copia o dashboard principal do repo (se existir)
+  if [[ -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" ]]; then
+    cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" \
+          /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json
+    ok "Dashboard aplicado: sentinela-unbound-main.json"
   else
-    # Fallback: cria placeholder se ainda não existir
-    if [[ ! -f "$DST_DASH" ]]; then
-      cat > "$DST_DASH" <<'EOF'
-{
-  "title": "Unbound Overview (Sentinela-DNS)",
-  "timezone": "browser",
-  "schemaVersion": 36,
-  "version": 1,
-  "panels": []
-}
+    warn "Dashboard do repo não encontrado; criando placeholder."
+    cat > /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json <<'EOF'
+{ "title": "Sentinela-DNS · Unbound (Main)", "schemaVersion": 36, "version": 1, "panels": [] }
 EOF
-      warn "Dashboard do repo não encontrado; placeholder criado em $DST_DASH"
-    fi
   fi
 
   systemctl enable grafana-server >/dev/null 2>&1 || true
@@ -261,13 +388,9 @@ EOF
 # ==========================
 echo
 inf "Executando checagens finais…"
-if [[ -x "${SCRIPT_DIR}/health.sh" ]]; then
-  "${SCRIPT_DIR}/health.sh" || true
-else
-  for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
-    systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
-  done
-fi
+for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
+  systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
+done
 
 echo
 ok "Instalação/atualização concluída."
