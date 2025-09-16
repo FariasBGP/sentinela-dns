@@ -4,7 +4,7 @@ set -euo pipefail
 # ==========================
 # Sentinela-DNS - instalador full auto (Debian 12 / amd64)
 # ==========================
-UNBOUND_EXPORTER_VERSION="${UNBOUND_EXPORTER_VERSION:-0.4.5}"
+UNBOUND_EXPORTER_VERSION="${UNBOUND_EXPORTER_VERSION:-0.4.6}"
 PROM_URL="${PROM_URL:-http://localhost:9090}"         # datasource do Grafana
 GRAFANA_INSTALL="${GRAFANA_INSTALL:-yes}"             # yes|no
 PROM_INSTALL="${PROM_INSTALL:-yes}"                   # yes|no
@@ -194,12 +194,13 @@ server:
     zonefile: ""
 EOF
 
+# Remote-control COM TLS (necessário p/ exporter com cert/key)
 cat >/etc/unbound/unbound.conf.d/99-remote-control.conf <<'EOF'
 remote-control:
   control-enable: yes
   control-interface: 127.0.0.1
   control-port: 8953
-  control-use-cert: no
+  control-use-cert: yes
 EOF
 
 # root.key (DNSSEC trust anchor)
@@ -215,42 +216,34 @@ ok "Unbound ativo (configuração modular)."
 # ==========================
 # unbound_exporter (download se existir; fallback: compilar do source)
 # ==========================
-inf "Instalando unbound_exporter…"
+inf "Instalando/ajustando unbound_exporter…"
 VER="${UNBOUND_EXPORTER_VERSION:-0.4.6}"
-set -x
 tmpdir="$(mktemp -d)"; pushd "$tmpdir" >/dev/null
-
 ok_dl=0
-# Tentativa 1: baixar tarball (se algum dos projetos voltar a publicar assets)
 for URL in \
   "https://github.com/letsencrypt/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz" \
   "https://github.com/kumina/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz"
 do
-  if curl -fL --connect-timeout 10 -o unbound_exporter.tar.gz "$URL"; then
-    if tar -tzf unbound_exporter.tar.gz >/dev/null 2>&1; then
-      tar -xzf unbound_exporter.tar.gz
-      # procura o binário onde quer que esteja
-      BIN="$(find . -type f -name unbound_exporter -perm -u+x | head -n1 || true)"
-      if [[ -n "$BIN" ]]; then
-        install -m0755 "$BIN" /usr/local/bin/unbound_exporter
-        ok_dl=1
-        break
-      fi
-    fi
+  if curl -fsSL --connect-timeout 10 -o ue.tar.gz "$URL" && tar -tzf ue.tar.gz >/dev/null 2>&1; then
+    tar -xzf ue.tar.gz
+    BIN="$(find . -type f -name unbound_exporter -perm -u+x | head -n1 || true)"
+    if [[ -n "$BIN" ]]; then install -m0755 "$BIN" /usr/local/bin/unbound_exporter; ok_dl=1; break; fi
   fi
 done
-
-# Tentativa 2: compilar do source (caminho robusto)
 if [[ "$ok_dl" -ne 1 ]]; then
-  inf "Tarball não disponível; compilando do source (Go)…"
+  inf "Tarball indisponível; compilando do source (Go)…"
   apt-get install -y golang
   GO111MODULE=on GOBIN=/usr/local/bin go install "github.com/letsencrypt/unbound_exporter@v${VER}"
 fi
-
 popd >/dev/null
-set +x
 
-# Service systemd (idempotente)
+# Certs do unbound-control (idempotente) + permissões
+unbound-control-setup >/dev/null 2>&1 || true
+chown unbound:unbound /etc/unbound/unbound_*pem /etc/unbound/unbound_*key 2>/dev/null || true
+chmod 640 /etc/unbound/unbound_*pem /etc/unbound/unbound_*key 2>/dev/null || true
+systemctl restart unbound
+
+# Service systemd (usa tcp:// e cert/key) — roda como usuário 'unbound'
 cat > /etc/systemd/system/unbound_exporter.service <<'EOF'
 [Unit]
 Description=Prometheus Unbound Exporter
@@ -258,20 +251,26 @@ After=network-online.target unbound.service
 Requires=unbound.service
 
 [Service]
-User=nobody
-Group=nogroup
+User=unbound
+Group=unbound
 ExecStart=/usr/local/bin/unbound_exporter \
   --unbound.host=tcp://127.0.0.1:8953 \
+  --unbound.cert=/etc/unbound/unbound_control.pem \
+  --unbound.key=/etc/unbound/unbound_control.key \
   --web.listen-address=:9167 \
   --web.telemetry-path=/metrics
 Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable unbound_exporter >/dev/null 2>&1 || true
+systemctl enable --now unbound_exporter >/dev/null 2>&1 || true
 systemctl restart unbound_exporter
 ok "unbound_exporter ativo em :9167."
 
@@ -354,7 +353,7 @@ datasources:
 EOF
   fi
 
-  # força UID: prometheus (se não existir)
+  # garante UID fixo
   if ! grep -q '^\s*uid:\s*prometheus' /etc/grafana/provisioning/datasources/prometheus.yaml; then
     awk '
       {print}
