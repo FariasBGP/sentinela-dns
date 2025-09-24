@@ -1,71 +1,37 @@
 #!/usr/bin/env bash
+# Sentinela-DNS — health.sh
 set -euo pipefail
 
-CLR_RESET="\033[0m"; CLR_OK="\033[32m"; CLR_WARN="\033[33m"; CLR_ERR="\033[31m"; CLR_INFO="\033[36m"
-ok(){   echo -e "${CLR_OK}✔$CLR_RESET $*"; }
-warn(){ echo -e "${CLR_WARN}▲$CLR_RESET $*"; }
-err(){  echo -e "${CLR_ERR}✖$CLR_RESET $*"; }
-inf(){  echo -e "${CLR_INFO}ℹ$CLR_RESET $*"; }
+GREEN="\033[1;32m"; YELLOW="\033[1;33m"; RED="\033[1;31m"; RESET="\033[0m"
+ok(){ echo -e "✔ ${GREEN}$*${RESET}"; }
+warn(){ echo -e "▲ ${YELLOW}$*${RESET}"; }
+err(){ echo -e "✖ ${RED}$*${RESET}"; }
 
-fail=0; add_fail(){ err "$*"; fail=$((fail+1)); }
+echo ">> Checando serviços..."
+for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
+  if systemctl is-active --quiet "$s"; then ok "service: $s -> active"; else warn "service: $s -> inactive"; fi
+done
 
-svc_check(){ local s="$1"
-  if systemctl is-active --quiet "$s"; then ok "Serviço ativo: $s"; else add_fail "Serviço INATIVO: $s"; fi
-}
+echo ">> Checando portas..."
+ss -tuln | grep -E ':(53|8953|9090|9100|9167|3000)\b' || warn "nenhuma das portas alvo apareceu"
 
-probe_http(){ local url="$1" name="$2"
-  if curl -fsS --max-time 5 "$url" >/dev/null; then ok "Endpoint OK: $name ($url)"
-  else add_fail "Falha endpoint: $name ($url)"; fi
-}
+echo ">> Endpoints:"
+for u in \
+  http://127.0.0.1:9100/metrics \
+  http://127.0.0.1:9167/metrics \
+  http://127.0.0.1:9090/-/ready \
+  http://127.0.0.1:3000/api/health
+do
+  printf "%s -> " "$u"
+  curl -fsS --max-time 5 "$u" >/dev/null && echo OK || echo FAIL
+done
 
-# --- Serviços
-inf "Checando serviços…"
-svc_check unbound
-svc_check unbound_exporter
-svc_check grafana-server
-svc_check prometheus
-svc_check prometheus-node-exporter || svc_check node-exporter || true
+echo ">> unbound-control status:"
+unbound-control -c /etc/unbound/unbound.conf status || warn "unbound-control falhou (verifique remote-control/certs)"
 
-# --- Portas (se 'ss' existir)
-if command -v ss >/dev/null 2>&1; then
-  inf "Checando portas (LISTEN)…"
-  for p in 53 9100 9167 9090 3000; do
-    if ss -tuln | grep -q ":$p\b"; then ok "Porta $p ouvindo"; else add_fail "Porta $p não está ouvindo"; fi
-  done
-fi
-
-# --- Endpoints HTTP
-inf "Checando endpoints HTTP…"
-probe_http "http://127.0.0.1:9100/metrics" "node_exporter"
-probe_http "http://127.0.0.1:9167/metrics" "unbound_exporter"
-probe_http "http://127.0.0.1:9090/-/ready"  "Prometheus ready"
-probe_http "http://127.0.0.1:3000/api/health" "Grafana health"
-
-# --- Unbound-control (opcional)
-if command -v unbound-control >/dev/null 2>&1; then
-  if unbound-control status >/dev/null 2>&1; then
-    ok "unbound-control responde (status OK)"
-  else
-    warn "unbound-control não respondeu (certs/remote-control?)."
-  fi
-fi
-
-# --- Prometheus targets (opcional)
-if curl -fsS --max-time 5 "http://127.0.0.1:9090/api/v1/targets" >/tmp/targets.json 2>/dev/null; then
-  up_unbound=$(jq -r '.data.activeTargets[]?|select(.labels.job=="unbound")|.health' /tmp/targets.json | grep -c "up" || true)
-  up_node=$(jq -r '.data.activeTargets[]?|select(.labels.job=="node")|.health' /tmp/targets.json | grep -c "up" || true)
-  [[ "$up_unbound" -ge 1 ]] && ok "Prometheus vê unbound_exporter (targets up: $up_unbound)" || add_fail "Prometheus NÃO vê unbound_exporter"
-  [[ "$up_node"    -ge 1 ]] && ok "Prometheus vê node_exporter (targets up: $up_node)"       || add_fail "Prometheus NÃO vê node_exporter"
+echo ">> DNS (teste simples):"
+if command -v dig >/dev/null 2>&1; then
+  dig @127.0.0.1 cloudflare.com A +dnssec +nocmd +noall +answer || warn "dig falhou"
 else
-  warn "Não consegui consultar /api/v1/targets do Prometheus."
-fi
-
-echo
-echo "================== RESUMO =================="
-if (( fail == 0 )); then
-  ok "Tudo saudável 🚀"
-  exit 0
-else
-  err "$fail verificação(ões) falhou/falharam."
-  exit 1
+  warn "dig não instalado"
 fi

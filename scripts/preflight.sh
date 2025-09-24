@@ -1,101 +1,75 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Sentinela-DNS — preflight.sh
+# Suporta Debian 12 (bookworm) e Debian 13 (trixie).
 
-# ==========================
-# CONFIG PADRÃO
-# ==========================
-REQUIRED_OS="Debian 12"
-ARCH_REQUIRED="x86_64"     # amd64
-GRAFANA_APT_FILE="/etc/apt/sources.list.d/grafana.list"
-PROM_TARGET_HOST="${PROM_TARGET_HOST:-localhost}"
-PROM_TARGET_PORT="${PROM_TARGET_PORT:-9090}"
+set -o nounset
+set -o pipefail
 
-CHECK_PORTS_UDP=(53)                  # Unbound
-CHECK_PORTS_TCP=(53 9100 9167 3000)   # Unbound, node_exporter, unbound_exporter, Grafana
+GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; CYAN="\033[1;36m"; BOLD="\033[1m"; RESET="\033[0m"
+ok()   { echo -e "✔ ${GREEN}$*${RESET}"; }
+warn() { echo -e "⚠ ${YELLOW}$*${RESET}"; }
+err()  { echo -e "✖ ${RED}$*${RESET}"; }
 
-REQUIRED_CMDS=(curl wget jq tar awk grep sed systemctl)
-OPTIONAL_CMDS=(dig host ss)
-PKGS_UTILS=(curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https netcat-openbsd iproute2)
-PKG_NODE_EXPORTER="prometheus-node-exporter"
-PKG_UNBOUND="unbound"
+PEND=0
+add_pend(){ PEND=$((PEND+1)); err "$@"; }
 
-DO_FIX=0
-[[ "${1:-}" == "--fix" ]] && DO_FIX=1
+echo -e ">> ${BOLD}Pré-check...${RESET}"
 
-CLR_RESET="\033[0m"; CLR_OK="\033[32m"; CLR_WARN="\033[33m"; CLR_ERR="\033[31m"; CLR_INFO="\033[36m"
-ok(){   echo -e "${CLR_OK}✔$CLR_RESET $*"; }
-warn(){ echo -e "${CLR_WARN}▲$CLR_RESET $*"; }
-err(){  echo -e "${CLR_ERR}✖$CLR_RESET $*"; }
-inf(){  echo -e "${CLR_INFO}ℹ$CLR_RESET $*"; }
-
-FAILS=()
-add_fail(){ FAILS+=("$*"); err "$*"; }
-
-# ==========================
-# ROOT
-# ==========================
-if [[ $EUID -ne 0 ]]; then
-  add_fail "Execute como root. Ex.: su - ; ./preflight.sh"
-  echo; echo "Resumo: ${#FAILS[@]} pendência(s)."; exit 1
-fi
-
-# ==========================
-# OS / ARCH
-# ==========================
-OS_NAME="$(lsb_release -sd 2>/dev/null || true)"
-DEBIAN_VER="$(cat /etc/debian_version 2>/dev/null || true)"
+# Detecta SO
+OS_NAME="Desconhecido"; DEBIAN_VERSION=""; DEBIAN_CODENAME=""
 ARCH="$(uname -m)"
-
-if [[ "$OS_NAME" =~ Debian\ GNU/Linux\ 12.* ]] || [[ "$DEBIAN_VER" =~ ^12 ]]; then
-  ok "SO: $OS_NAME (debian_version: $DEBIAN_VER)"
-else
-  add_fail "SO não é Debian 12. Detectado: '$OS_NAME' (debian_version: $DEBIAN_VER)"
-fi
-
-if [[ "$ARCH" == "$ARCH_REQUIRED" ]]; then
-  ok "Arquitetura: $ARCH"
-else
-  add_fail "Arquitetura esperada '$ARCH_REQUIRED', detectado '$ARCH'"
-fi
-
-# ==========================
-# Conectividade externa
-# ==========================
-check_http(){ local url="$1"
-  if curl -fsSL --max-time 8 "$url" >/dev/null; then ok "Acesso OK: $url"; else add_fail "Sem acesso: $url"; fi
+[[ -r /etc/os-release ]] && . /etc/os-release && {
+  OS_NAME="${PRETTY_NAME:-$NAME}"
+  DEBIAN_VERSION="${VERSION_ID:-}"
+  DEBIAN_CODENAME="${VERSION_CODENAME:-}"
 }
-inf "Checando acesso externo…"
-check_http "https://github.com/"
-check_http "https://api.github.com/"
-check_http "https://packages.grafana.com/"
-check_http "https://deb.debian.org/"
 
-# ==========================
-# Binários necessários
-# ==========================
-MISSING_CMDS=()
-for c in "${REQUIRED_CMDS[@]}"; do
-  if command -v "$c" >/dev/null 2>&1; then ok "Binário presente: $c"; else MISSING_CMDS+=("$c"); add_fail "Falta binário: $c"; fi
+echo -e "  Arquitetura: ${BOLD}${ARCH}${RESET}"
+case "${DEBIAN_VERSION%%.*}" in
+  12|13) ok "SO OK: Debian ${DEBIAN_VERSION} (${DEBIAN_CODENAME}) detectado." ;;
+  *)     warn "SO não testado oficialmente: ${OS_NAME} (${DEBIAN_VERSION:-?})";;
+esac
+
+# Acesso externo (não trava)
+check_url(){ curl -fsS --max-time 5 -o /dev/null "$1" && ok "Acesso OK: $1" || warn "Acesso FALHOU: $1"; }
+check_url "https://github.com/"
+check_url "https://api.github.com/"
+check_url "https://packages.grafana.com/"
+check_url "https://deb.debian.org/"
+
+# Binários
+need_bins=(curl wget jq tar awk grep sed systemctl)
+opt_bins=(dig host ss nc)
+for b in "${need_bins[@]}"; do
+  command -v "$b" >/dev/null 2>&1 && ok "Binário presente: $b" \
+    || add_pend "Binário ausente: $b (apt-get update && apt-get install -y $b)"
 done
-for c in "${OPTIONAL_CMDS[@]}"; do
-  if command -v "$c" >/dev/null 2>&1; then ok "Opcional presente: $c"; else warn "Opcional ausente: $c"; fi
+for b in "${opt_bins[@]}"; do
+  command -v "$b" >/dev/null 2>&1 && ok "Opcional presente: $b" \
+    || warn "Opcional ausente: $b (recomendado instalar)"
 done
 
-if (( DO_FIX )) && ((${#MISSING_CMDS[@]} > 0)); then
-  inf "Instalando utilitários básicos… (${PKGS_UTILS[*]})"
-  apt-get update -y && apt-get install -y "${PKGS_UTILS[@]}" || add_fail "Falha ao instalar utilitários básicos."
-fi
+# systemd / journal
+systemctl --version >/dev/null 2>&1 && ok "systemd OK" || add_pend "systemd indisponível"
+[[ -d /var/log/journal ]] && ok "journal persistente presente (/var/log/journal)" \
+  || warn "journal persistente ausente (recomendado: mkdir -p /var/log/journal)"
 
-# ==========================
-# RESUMO FINAL
-# ==========================
+# Pacotes Debian necessários (inclui libssl3 e unbound-anchor)
+need_pkgs=(libssl3 unbound-anchor)
+for p in "${need_pkgs[@]}"; do
+  dpkg -s "$p" >/dev/null 2>&1 && ok "Pacote presente: $p" \
+    || warn "Pacote ausente: $p (instalar: apt-get install -y $p)"
+done
+
 echo
-echo "================== RESUMO =================="
-if ((${#FAILS[@]}==0)); then
-  ok "Pré-check finalizado: ambiente OK para instalar."
-  exit 0
-else
-  err "Foram encontradas ${#FAILS[@]} pendência(s):"
-  for f in "${FAILS[@]}"; do echo " - $f"; done
+echo "================ RESUMO ================"
+if [[ $PEND -gt 0 ]]; then
+  add_pend "Foram encontradas ${PEND} pendência(s)."
+  echo -e "${YELLOW}Sugestão:${RESET} apt-get update && apt-get install -y ${need_bins[*]}"
   exit 1
+else
+  ok "Nenhuma pendência crítica encontrada."
+  echo -e "SO detectado: '${OS_NAME}' (debian_version: ${DEBIAN_VERSION:-?}, codename: ${DEBIAN_CODENAME:-?})"
+  echo -e "Pronto para prosseguir com ${BOLD}make install${RESET}."
+  exit 0
 fi

@@ -1,2 +1,20 @@
-prometheus/
-prometheus/
+# artefatos locais
+*.swp
+*.swo
+.env
+*.log
+*.tmp
+tmp/
+# backups/editores
+*~
+*.bak
+# nada de arquivos de /etc reais
+/etc/
+/var/
+/root/
+/run/
+# chaves/certificados (só geradas no host)
+*.key
+*.pem
+# caches
+__pycache__/
