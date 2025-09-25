@@ -97,3 +97,11 @@ prometheus-reset:
 	@which promtool >/dev/null 2>&1 && promtool check config /etc/prometheus/prometheus.yml || true
 	@systemctl restart prometheus
 	@systemctl --no-pager --full status prometheus || true
+
+.PHONY: help list
+help:
+	@echo "Sentinela-DNS — alvos principais:"
+	@echo "  preflight | install | health | grafana-sync | grafana-sync-system"
+	@echo "  prometheus-reset | tune | bench | update | status | logs | fix | clean"
+
+list: help

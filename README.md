@@ -191,3 +191,16 @@ make dashboard-export
 Este projeto está sob a licença **MIT**. Consulte o arquivo [LICENSE].
 
 >>>>>>> 1199db1 (chore: sincroniza alterações locais (README e scripts))
+
+---
+
+## System Dashboard (Node Exporter)
+
+Provisionamos um painel de sistema com CPU, memória, load, disco, rede e 4 cards de bench.  
+Arquivos:
+- grafana/provisioning/dashboards/sentinela-system-main.json
+- grafana/provisioning/dashboards/sentinela-system.yaml
+
+**Provisionar no host:**
+```bash
+make grafana-sync-system

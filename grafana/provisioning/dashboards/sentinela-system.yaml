@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: 'Sentinela-DNS System'
+    orgId: 1
+    folder: 'DNS/System'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/system
