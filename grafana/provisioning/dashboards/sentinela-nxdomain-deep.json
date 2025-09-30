@@ -1,0 +1,385 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total NXDOMAIN (janela: 12h - do Script)",
+      "id": 1,
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sentinela_nxdomain_total{window=\"12h\"}",
+          "legendFormat": "Total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 1000 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Taxa NXDOMAIN (rate 1m - Nativo Unbound)",
+      "id": 2,
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(unbound_answer_rcodes_total{rcode=\"NXDOMAIN\"}[1m]))",
+          "legendFormat": "NXDOMAIN/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Proporção NXDOMAIN no Total de Respostas (1m)",
+      "id": 3,
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "100 * sum(rate(unbound_answer_rcodes_total{rcode=\"NXDOMAIN\"}[1m])) / sum(rate(unbound_answer_rcodes_total[1m]))",
+          "legendFormat": "% NXDOMAIN",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Evolução NXDOMAIN vs SERVFAIL vs NOERROR (rate 1m)",
+      "id": 4,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(unbound_answer_rcodes_total{rcode=\"NXDOMAIN\"}[1m]))",
+          "legendFormat": "NXDOMAIN",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(unbound_answer_rcodes_total{rcode=\"SERVFAIL\"}[1m]))",
+          "legendFormat": "SERVFAIL",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(unbound_answer_rcodes_total{rcode=\"NOERROR\"}[1m]))",
+          "legendFormat": "NOERROR",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "Distribuição de RCODEs com Foco em Erros (1m)",
+      "id": 5,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "pieType": "pie"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (rcode) (rate(unbound_answer_rcodes_total[1m]))",
+          "format": "table",
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Top 20 IPs Gerando NXDOMAIN (janela: 12h - do Script)",
+      "id": 6,
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 12 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Contagem" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(20, sentinela_nxdomain_ip_count{window=\"12h\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Contagem" },
+              { "id": "unit", "value": "short" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 500 }] } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ip" },
+            "properties": [{ "id": "displayName", "value": "IP" }]
+          }
+        ]
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "window": true }, "indexByName": { "ip": 0, "Value": 1 } } }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Top 20 Domínios Gerando NXDOMAIN (janela: 12h - do Script)",
+      "id": 7,
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 22 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Contagem" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(20, sentinela_nxdomain_domain_count{window=\"12h\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Contagem" },
+              { "id": "unit", "value": "short" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 500 }] } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "domain" },
+            "properties": [{ "id": "displayName", "value": "Domínio" }]
+          }
+        ]
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "window": true }, "indexByName": { "domain": 0, "Value": 1 } } }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 IPs por NXDOMAIN (Barras - janela: 12h)",
+      "id": 8,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(10, sentinela_nxdomain_ip_count{window=\"12h\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "Contagem" }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 Domínios por NXDOMAIN (Barras - janela: 12h)",
+      "id": 9,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(10, sentinela_nxdomain_domain_count{window=\"12h\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "Contagem" }]
+          }
+        ]
+      }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["prometheus", "sentinela-dns", "unbound", "nxdomain"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "selected": true },
+        "hide": 0
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Sentinela-DNS · NXDOMAIN Deep Dive",
+  "uid": "sentinela-nxdomain-deep",
+  "version": 1,
+  "weekStart": ""
+}
