@@ -30,6 +30,12 @@ case "${DEBIAN_VERSION%%.*}" in
   *)     warn "SO não testado oficialmente: ${OS_NAME} (${DEBIAN_VERSION:-?})";;
 esac
 
+# Define pacote libssl baseado na versão do Debian
+LIBSSL_PKG="libssl3"
+if [[ "${DEBIAN_VERSION%%.*}" == "13" ]]; then
+  LIBSSL_PKG="libssl3t64"
+fi
+
 # Acesso externo (não trava)
 check_url(){ curl -fsS --max-time 5 -o /dev/null "$1" && ok "Acesso OK: $1" || warn "Acesso FALHOU: $1"; }
 check_url "https://github.com/"
@@ -54,12 +60,25 @@ systemctl --version >/dev/null 2>&1 && ok "systemd OK" || add_pend "systemd indi
 [[ -d /var/log/journal ]] && ok "journal persistente presente (/var/log/journal)" \
   || warn "journal persistente ausente (recomendado: mkdir -p /var/log/journal)"
 
-# Pacotes Debian necessários (inclui libssl3 e unbound-anchor)
-need_pkgs=(libssl3 unbound-anchor)
+# Pacotes Debian necessários (inclui libssl, unbound e unbound-anchor)
+need_pkgs=("${LIBSSL_PKG}" unbound unbound-anchor)
 for p in "${need_pkgs[@]}"; do
   dpkg -s "$p" >/dev/null 2>&1 && ok "Pacote presente: $p" \
     || warn "Pacote ausente: $p (instalar: apt-get install -y $p)"
 done
+
+# Verificação da versão do Unbound
+if command -v unbound >/dev/null 2>&1; then
+  UNBOUND_VERSION=$(unbound -V | grep -E '^Version' | awk '{print $2}')
+  MIN_UNBOUND_VERSION="1.13.0"
+  if [[ "$(printf '%s\n' "$UNBOUND_VERSION" "$MIN_UNBOUND_VERSION" | sort -V | head -n1)" == "$MIN_UNBOUND_VERSION" ]]; then
+    ok "Versão do Unbound OK: $UNBOUND_VERSION (mínimo requerido: $MIN_UNBOUND_VERSION)"
+  else
+    add_pend "Versão do Unbound insuficiente: $UNBOUND_VERSION (mínimo requerido: $MIN_UNBOUND_VERSION)"
+  fi
+else
+  warn "Unbound não instalado (será instalado pelo script de instalação)"
+fi
 
 echo
 echo "================ RESUMO ================"

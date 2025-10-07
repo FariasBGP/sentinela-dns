@@ -31,18 +31,29 @@ case "${VERSION_ID%%.*}" in
   *)     warn "SO não testado oficialmente (${PRETTY_NAME:-?}). Prosseguindo…";;
 esac
 
+# Define pacote libssl baseado na versão do Debian
+LIBSSL_PKG="libssl3"
+if [[ "${VERSION_ID%%.*}" == "13" ]]; then
+  LIBSSL_PKG="libssl3t64"
+fi
+
 # ===== Pacotes base =====
 inf "Atualizando sistema e instalando utilitários…"
 apt-get update -y
 apt-get dist-upgrade -y || true
 apt-get install -y curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https \
-                   dnsutils iproute2 netcat-openbsd libssl3 unbound unbound-anchor
+                   dnsutils iproute2 netcat-openbsd apparmor-utils "${LIBSSL_PKG}" unbound unbound-anchor
+
+# Desabilita AppArmor para unbound (evita problemas de permissão em certs)
+inf "Desabilitando AppArmor para unbound..."
+aa-disable /etc/apparmor.d/usr.sbin.unbound || true
 
 # ===== Unbound (config modular) =====
-inf "Instalando/ativando Unbound…"
+inf "Configurando Unbound (modular)…"
 install -d -m 0755 /etc/unbound/unbound.conf.d
 
-# unbound.conf — mantém apenas 1 include
+# unbound.conf — mantém apenas 1 include, removendo configs padrão que possam duplicar
+rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf  # Remove se existir do pacote
 cat >/etc/unbound/unbound.conf <<'EOF'
 server:
   verbosity: 1
@@ -50,11 +61,7 @@ server:
 include: "/etc/unbound/unbound.conf.d/*.conf"
 EOF
 
-# Fragments (idempotentes)
-cat >/etc/unbound/unbound.conf.d/21-root-auto-trust-anchor-file.conf <<'EOF'
-server:
-  auto-trust-anchor-file: "/var/lib/unbound/root.key"
-EOF
+# Fragments (idempotentes) - Removido 21-root-auto-trust-anchor-file.conf para evitar duplicata com auth-zone
 
 cat >/etc/unbound/unbound.conf.d/31-statisticas.conf <<'EOF'
 server:
@@ -145,7 +152,7 @@ server:
   so-reuseport: yes
 EOF
 
-# Interfaces — **não** criamos 62-loopback.conf (para evitar duplicatas)
+# Interfaces
 cat >/etc/unbound/unbound.conf.d/63-listen-interfaces.conf <<'EOF'
 server:
   interface: 0.0.0.0
@@ -155,7 +162,7 @@ server:
   do-tcp: yes
 EOF
 
-# Hyperlocal root cache (opcional — mantém do original)
+# Hyperlocal root cache (opcional) - Isso substitui o auto-trust-anchor
 cat >/etc/unbound/unbound.conf.d/89-hyperlocal-cache.conf <<'EOF'
 server:
   auth-zone:
@@ -188,56 +195,81 @@ server:
   zonefile: ""
 EOF
 
-# Remote-control (com chroot desativado p/ evitar problemas de path/permissões)
+# Remote-control (sem chroot para evitar conflitos)
 cat >/etc/unbound/unbound.conf.d/99-remote-control.conf <<'EOF'
 server:
   chroot: ""
+  directory: "/etc/unbound"
+  pidfile: "/var/run/unbound.pid"
+  username: "unbound"
 
 remote-control:
   control-enable: yes
   control-interface: 127.0.0.1
   control-port: 8953
   control-use-cert: yes
-  server-key-file:   "/etc/unbound/unbound_server.key"
-  server-cert-file:  "/etc/unbound/unbound_server.pem"
-  control-key-file:  "/etc/unbound/unbound_control.key"
+  server-key-file: "/etc/unbound/unbound_server.key"
+  server-cert-file: "/etc/unbound/unbound_server.pem"
+  control-key-file: "/etc/unbound/unbound_control.key"
   control-cert-file: "/etc/unbound/unbound_control.pem"
 EOF
 
-# Limpeza de arquivos antigos/duplicados (se existirem)
-rm -f /etc/unbound/unbound.conf.d/62-listen-loopback.conf \
-      /etc/unbound/unbound.conf.d/remote-control.conf
+# Corrige permissões no diretório unbound
+chown -R unbound:unbound /etc/unbound /var/lib/unbound
+chmod -R 755 /etc/unbound
+chmod 600 /etc/unbound/unbound_{server,control}.key 2>/dev/null || true
+chmod 644 /etc/unbound/unbound_{server,control}.pem 2>/dev/null || true
+chmod 644 /var/lib/unbound/root.key 2>/dev/null || true
 
-# ===== Anchor (DNSSEC) =====
-if [[ ! -f /var/lib/unbound/root.key ]]; then
-  unbound-anchor -a /var/lib/unbound/root.key || true
+# Valida config antes de prosseguir
+if ! unbound-checkconf >/dev/null 2>&1; then
+  err "Configuração do Unbound inválida! Verifique /etc/unbound/unbound.conf e fragments."
+  unbound-checkconf
+  exit 1
 fi
-chown unbound:unbound /var/lib/unbound/root.key
-chmod 644 /var/lib/unbound/root.key
-ok "Trust anchor OK (/var/lib/unbound/root.key)"
+ok "Configuração do Unbound validada."
 
-# ===== Remote-control (certs/keys) =====
-unbound-control-setup >/dev/null 2>&1 || true
-chown root:unbound /etc/unbound/unbound_*.{key,pem}
-chmod 640 /etc/unbound/unbound_*.{key,pem}
-chmod 750 /etc/unbound
-chown root:unbound /etc/unbound
-printf 'DAEMON_OPTS=""\n' >/etc/default/unbound || true
+# Gera certificados do unbound-control (idempotente, após config)
+if [[ ! -f /etc/unbound/unbound_server.key || ! -f /etc/unbound/unbound_control.key ]]; then
+  inf "Gerando certificados para unbound-control..."
+  unbound-control-setup -d /etc/unbound/ || {
+    err "Falha no unbound-control-setup. Verifique logs."
+    exit 1
+  }
+  chown unbound:unbound /etc/unbound/unbound_{server,control}.{key,pem}
+  chmod 600 /etc/unbound/unbound_{server,control}.key
+  chmod 644 /etc/unbound/unbound_{server,control}.pem
+fi
 
-# ===== Valida e sobe Unbound =====
-unbound-checkconf /etc/unbound/unbound.conf
-systemctl enable --now unbound
+# Override systemd para remover chroot e definir ExecStart
+install -d -m 0755 /etc/systemd/system/unbound.service.d
+cat >/etc/systemd/system/unbound.service.d/override.conf <<'EOF'
+[Service]
+ExecStartPre=
+Environment="DAEMON_OPTS="
+ExecStart=
+ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
+EOF
+
+systemctl daemon-reload
+
+systemctl enable unbound
+sleep 2  # Aguarda estabilizar
 systemctl restart unbound
-ok "Unbound ativo."
+sleep 2
+if ! systemctl is-active --quiet unbound; then
+  err "Falha ao iniciar Unbound após config. Verifique: systemctl status unbound"
+  exit 1
+fi
+ok "Unbound ativo em :53."
 
 # ===== unbound_exporter =====
-inf "Instalando/ajustando unbound_exporter…"
-VER="${UNBOUND_EXPORTER_VERSION}"
+inf "Instalando unbound_exporter (v${UNBOUND_EXPORTER_VERSION})…"
 tmpdir="$(mktemp -d)"; pushd "$tmpdir" >/dev/null
 ok_dl=0
 for URL in \
-  "https://github.com/letsencrypt/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz" \
-  "https://github.com/kumina/unbound_exporter/releases/download/v${VER}/unbound_exporter-${VER}.linux-amd64.tar.gz"
+  "https://github.com/letsencrypt/unbound_exporter/releases/download/v${UNBOUND_EXPORTER_VERSION}/unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz" \
+  "https://github.com/kumina/unbound_exporter/releases/download/v${UNBOUND_EXPORTER_VERSION}/unbound_exporter-${UNBOUND_EXPORTER_VERSION}.linux-amd64.tar.gz"
 do
   if curl -fsSL --connect-timeout 10 -o ue.tar.gz "$URL" && tar -tzf ue.tar.gz >/dev/null 2>&1; then
     tar -xzf ue.tar.gz
@@ -248,11 +280,11 @@ done
 if [[ "$ok_dl" -ne 1 ]]; then
   inf "Tarball indisponível; compilando do source (Go)…"
   apt-get install -y golang
-  GO111MODULE=on GOBIN=/usr/local/bin go install "github.com/letsencrypt/unbound_exporter@v${VER}"
+  GO111MODULE=on GOBIN=/usr/local/bin go install "github.com/letsencrypt/unbound_exporter@v${UNBOUND_EXPORTER_VERSION}"
 fi
 popd >/dev/null
 
-# Service systemd do exporter (usa tcp:// e certs do unbound-control)
+# Service systemd do exporter
 cat > /etc/systemd/system/unbound_exporter.service <<'EOF'
 [Unit]
 Description=Prometheus Unbound Exporter
@@ -303,7 +335,7 @@ if [[ "$PROM_INSTALL" == "yes" ]]; then
     cp -a "$PROM_FILE" "${PROM_FILE}.bak.$(date +%F-%H%M%S)"
   fi
 
-  # Escreve template LIMPO (evita jobs duplicados)
+  # Escreve template LIMPO
   cat > "$PROM_FILE" <<'EOF'
 global:
   scrape_interval: 15s
@@ -323,7 +355,7 @@ scrape_configs:
       - targets: ['localhost:9100']
 EOF
 
-  # Validação de sintaxe (não aborta instalação se falhar, mas loga)
+  # Validação
   if command -v promtool >/dev/null 2>&1; then
     promtool check config "$PROM_FILE" || echo "WARN: promtool apontou problemas em $PROM_FILE"
   fi
@@ -343,21 +375,23 @@ if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
   fi
   apt-get install -y grafana
 
+  # Verifica se porta 3000 está livre; mata se ocupada
+  if ss -tuln | grep -q ':3000 '; then
+    inf "Porta 3000 ocupada; matando processo..."
+    fuser -k 3000/tcp || true
+  fi
+
   install -d /etc/grafana/provisioning/datasources
-  if [[ -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" ]]; then
-    cp -f "${REPO_ROOT}/grafana/provisioning/datasources/prometheus.yaml" /etc/grafana/provisioning/datasources/prometheus.yaml
-    sed -i "s#^\s*url:.*#  url: ${PROM_URL}#g" /etc/grafana/provisioning/datasources/prometheus.yaml || true
-  else
-    cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
+  rm -f /etc/grafana/provisioning/datasources/sample.yaml
+  cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
 apiVersion: 1
 datasources:
-  - name: Prometheus
-    type: prometheus
-    url: ${PROM_URL}
-    access: proxy
-    isDefault: true
+- name: Prometheus
+  type: prometheus
+  url: ${PROM_URL}
+  access: proxy
+  isDefault: true
 EOF
-  fi
 
   install -d /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards/unbound
   cat > /etc/grafana/provisioning/dashboards/sentinela-unbound.yaml <<'EOF'
@@ -381,8 +415,21 @@ EOF
 EOF
   fi
 
+  # Corrige permissões para Grafana
+  chown -R grafana:grafana /etc/grafana /var/lib/grafana /var/log/grafana
+  chmod -R 755 /etc/grafana /var/lib/grafana /var/log/grafana
+
+  systemctl daemon-reload
   systemctl enable --now grafana-server
-  systemctl restart grafana-server
+  systemctl restart grafana-server || {
+    err "Falha ao iniciar Grafana. Verifique logs com journalctl -u grafana-server"
+    exit 1
+  }
+  sleep 5
+  if ! systemctl is-active --quiet grafana-server; then
+    err "Grafana não subiu. Verifique systemctl status grafana-server"
+    exit 1
+  fi
   ok "Grafana ativo em :3000."
 fi
 
