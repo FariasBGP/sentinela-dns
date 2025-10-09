@@ -1,5 +1,4 @@
 # Makefile — Sentinela-DNS (Debian 12/13)
-
 SHELL := /bin/bash
 REPO_ROOT := $(shell pwd)
 SCRIPTS   := $(REPO_ROOT)/scripts
@@ -17,7 +16,7 @@ install:
 	@$(SCRIPTS)/install.sh
 
 health:
-	@echo ">> Checando saúde dos serviços..."
+	@echo ">> Checando saúde dos serviços (incluindo Unbound)..."
 	@chmod +x $(SCRIPTS)/health.sh || true
 	@$(SCRIPTS)/health.sh
 
