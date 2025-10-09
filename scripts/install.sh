@@ -313,6 +313,11 @@ EOF
 systemctl daemon-reload
 systemctl enable --now unbound_exporter
 systemctl restart unbound_exporter
+sleep 2
+if ! systemctl is-active --quiet unbound_exporter; then
+  err "Falha ao iniciar unbound_exporter. Verifique: journalctl -u unbound_exporter"
+  exit 1
+fi
 ok "unbound_exporter ativo em :9167."
 
 # ===== node_exporter =====
