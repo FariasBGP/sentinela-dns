@@ -4,7 +4,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(shell pwd)
 SCRIPTS   := $(REPO_ROOT)/scripts
 
-.PHONY: preflight install health grafana-sync status logs fix clean test prometheus-reset
+.PHONY: preflight install health grafana-sync status logs fix clean test prometheus-reset optimize
 
 preflight:
 	@echo ">> Pré-check..."
@@ -80,16 +80,13 @@ prometheus-reset:
 		global:
 		  scrape_interval: 15s
 		  evaluation_interval: 15s
-
 		scrape_configs:
 		  - job_name: 'prometheus'
 		    static_configs:
 		      - targets: ['localhost:9090']
-
 		  - job_name: 'unbound'
 		    static_configs:
 		      - targets: ['localhost:9167']
-
 		  - job_name: 'node'
 		    static_configs:
 		      - targets: ['localhost:9100']
@@ -97,3 +94,8 @@ prometheus-reset:
 	@which promtool >/dev/null 2>&1 && promtool check config /etc/prometheus/prometheus.yml || true
 	@systemctl restart prometheus
 	@systemctl --no-pager --full status prometheus || true
+
+optimize:
+	@echo ">> Otimizando Unbound com base em hardware..."
+	@chmod +x $(SCRIPTS)/optimize.sh || true
+	@$(SCRIPTS)/optimize.sh
