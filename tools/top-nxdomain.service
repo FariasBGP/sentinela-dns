@@ -1,6 +1,0 @@
-[Unit]
-Description=Gera métricas NXDOMAIN (textfile collector) para Prometheus
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/top-nxdomain.sh 12h 20
