@@ -86,3 +86,10 @@ if systemctl is-active --quiet unbound_exporter; then
 else
   warn "Exporter inativo; skip métricas"
 fi
+
+echo ">> Checando métricas customizadas (node_exporter):"
+if curl -s http://127.0.0.1:9100/metrics | grep -q "sentinela_nxdomain_total"; then
+  ok "Métricas sentinela OK"
+else
+  warn "Métricas sentinela ausentes no node_exporter (verifique a config)"
+fi
