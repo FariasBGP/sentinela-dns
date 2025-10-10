@@ -322,9 +322,26 @@ ok "unbound_exporter ativo em :9167."
 
 # ===== node_exporter =====
 if [[ "$NODE_EXPORTER_INSTALL" == "yes" ]]; then
+  inf "Instalando e configurando prometheus-node-exporter..."
   apt-get install -y prometheus-node-exporter
-  systemctl enable --now prometheus-node-exporter
-  ok "node_exporter ativo em :9100."
+
+  # Garante que o exporter leia nosso diretório de métricas customizadas
+  install -d -m 0755 /etc/systemd/system/prometheus-node-exporter.service.d
+  cat > /etc/systemd/system/prometheus-node-exporter.service.d/override.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/prometheus-node-exporter --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
+EOF
+
+  systemctl daemon-reload
+  systemctl enable prometheus-node-exporter
+  systemctl restart prometheus-node-exporter
+  sleep 2
+  if ! systemctl is-active --quiet prometheus-node-exporter; then
+    err "Falha ao iniciar prometheus-node-exporter. Verifique: journalctl -u prometheus-node-exporter"
+    exit 1
+  fi
+  ok "prometheus-node-exporter ativo em :9100 (com textfile collector)."
 fi
 
 # ===== Prometheus (idempotente) =====
