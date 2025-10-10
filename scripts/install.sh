@@ -429,12 +429,31 @@ providers:
 EOF
 
   if [[ -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" ]]; then
-    cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" \
-      /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json
+    cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/"*.json \
+      /var/lib/grafana/dashboards/unbound/
   else
     cat > /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json <<'EOF'
 { "title": "Sentinela-DNS · Unbound (Main)", "schemaVersion": 36, "version": 1, "panels": [] }
 EOF
+  fi
+  
+  # ===== Personalização do Branding (Logo) =====
+  inf "Aplicando branding personalizado no Grafana..."
+  BRANDING_DIR="${REPO_ROOT}/branding"
+  GRAFANA_IMG_DIR="/usr/share/grafana/public/img"
+  
+  if [[ -f "${BRANDING_DIR}/logo.jpg" ]]; then
+    # Faz backup dos logos originais (apenas na primeira vez)
+    mv "${GRAFANA_IMG_DIR}/grafana_logo.svg" "${GRAFANA_IMG_DIR}/grafana_logo.svg.bak" 2>/dev/null || true
+    mv "${GRAFANA_IMG_DIR}/grafana_icon.svg" "${GRAFANA_IMG_DIR}/grafana_icon.svg.bak" 2>/dev/null || true
+
+    # Copia o novo logo, substituindo os ficheiros do Grafana
+    cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_logo.svg"
+    cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_icon.svg"
+    
+    ok "Logo do Sentinela-DNS aplicado."
+  else
+    warn "Ficheiro de logo não encontrado em ${BRANDING_DIR}/logo.jpg. A usar o logo padrão do Grafana."
   fi
 
   # Corrige permissões para Grafana
