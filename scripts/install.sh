@@ -455,6 +455,31 @@ EOF
   ok "Grafana ativo em :3000."
 fi
 
+# ===== Coletor Customizado NXDOMAIN =====
+inf "Instalando e agendando o coletor de métricas NXDOMAIN..."
+
+# Copia o script otimizado para o diretório de binários
+if [[ -f "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" ]]; then
+  install -m 0755 "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" /usr/local/bin/
+  ok "Script top-nxdomain-optimized.sh instalado."
+else
+  warn "Script top-nxdomain-optimized.sh não encontrado no repositório."
+fi
+
+# Copia e ativa as unidades do systemd (service e timer)
+if [[ -d "${REPO_ROOT}/systemd" ]]; then
+  # Copia os arquivos de serviço e timer
+  install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
+  install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
+
+  # Recarrega o systemd, habilita e inicia o timer
+  systemctl daemon-reload
+  systemctl enable --now top-nxdomain.timer
+  ok "Coletor NXDOMAIN agendado para rodar a cada 10 minutos."
+else
+  warn "Diretório 'systemd' não encontrado. Pulei a instalação do coletor NXDOMAIN."
+fi
+
 # ===== Health-check final =====
 for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
   systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
