@@ -1,0 +1,9 @@
+[Unit]
+Description=Gera métricas NXDOMAIN (textfile collector) para o Prometheus
+Wants=network-online.target
+After=network-online.target unbound.service
+
+[Service]
+Type=oneshot
+# Executa o novo script otimizado
+ExecStart=/usr/local/bin/top-nxdomain-optimized.sh 12h 20
