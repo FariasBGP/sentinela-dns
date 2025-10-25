@@ -1,0 +1,16 @@
+[Unit]
+Description=Agente Sentinela-DNS (Gestor de Configuração Remota)
+After=network-online.target unbound.service
+Requires=unbound.service
+
+[Service]
+ExecStart=/opt/sentinela-dns/scripts/sentinela-agent.py
+# O agente deve ser executado como root para poder
+# escrever em /etc/unbound e executar unbound-control
+User=root
+Group=root
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
