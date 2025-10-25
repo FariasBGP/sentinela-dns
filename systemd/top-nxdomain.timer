@@ -1,0 +1,11 @@
+[Unit]
+Description=Executa o coletor de métricas NXDOMAIN a cada 10 minutos
+
+[Timer]
+# Executa 1 minuto após o boot e depois a cada 10 minutos
+OnBootSec=1min
+OnUnitActiveSec=10min
+Unit=top-nxdomain.service
+
+[Install]
+WantedBy=timers.target
