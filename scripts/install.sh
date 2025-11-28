@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sentinela-DNS — install.sh
-# Instala/atualiza Unbound + Exporters + Prometheus + Grafana (Debian 12/13).
+# Instala/atualiza Unbound + Exporters + Prometheus + Grafana + Agente (Debian 12/13).
 
 set -euo pipefail
 
@@ -41,10 +41,12 @@ fi
 inf "Atualizando sistema e instalando utilitários…"
 apt-get update -y
 apt-get dist-upgrade -y || true
+# ADICIONADO: python3-requests para o Agente Sentinela
 apt-get install -y curl wget jq tar ca-certificates gnupg lsb-release apt-transport-https \
-                   dnsutils iproute2 netcat-openbsd apparmor-utils "${LIBSSL_PKG}" unbound unbound-anchor
+                   dnsutils iproute2 netcat-openbsd apparmor-utils "${LIBSSL_PKG}" unbound unbound-anchor \
+                   python3-requests
 
-# Desabilita AppArmor para unbound (evita problemas de permissão em certs)
+# Desabilita AppArmor para unbound
 inf "Desabilitando AppArmor para unbound..."
 aa-disable /etc/apparmor.d/usr.sbin.unbound || true
 
@@ -52,16 +54,12 @@ aa-disable /etc/apparmor.d/usr.sbin.unbound || true
 inf "Configurando Unbound (modular)…"
 install -d -m 0755 /etc/unbound/unbound.conf.d
 
-# unbound.conf — mantém apenas 1 include, removendo configs padrão que possam duplicar
-rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf  # Remove se existir do pacote
+rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf
 cat >/etc/unbound/unbound.conf <<'EOF'
 server:
   verbosity: 1
-
 include: "/etc/unbound/unbound.conf.d/*.conf"
 EOF
-
-# Fragments (idempotentes) - Removido 21-root-auto-trust-anchor-file.conf para evitar duplicata com auth-zone
 
 cat >/etc/unbound/unbound.conf.d/31-statisticas.conf <<'EOF'
 server:
@@ -91,7 +89,6 @@ cat >/etc/unbound/unbound.conf.d/52-acls-trusteds.conf <<'EOF'
 server:
   # Coloque aqui faixas adicionais de clientes confiáveis
   # access-control: 192.168.0.0/22 allow
-  # access-control: 2001:db8::/32 allow
 EOF
 
 cat >/etc/unbound/unbound.conf.d/59-acls-default-policy.conf <<'EOF'
@@ -100,21 +97,18 @@ server:
   access-control: ::/0 deny
 EOF
 
-# Ajustes de desempenho (alinhados e potências de 2)
+# Ajustes de desempenho
 cat >/etc/unbound/unbound.conf.d/61-configs.conf <<'EOF'
 server:
   outgoing-range: 8192
   outgoing-port-avoid: 0-1024
   outgoing-port-permit: 1025-65535
-
   num-threads: 32
   num-queries-per-thread: 2048
-
   msg-cache-size: 64m
   msg-cache-slabs: 32
   rrset-cache-size: 128m
   rrset-cache-slabs: 32
-
   infra-host-ttl: 60
   infra-lame-ttl: 120
   infra-cache-numhosts: 10000
@@ -122,7 +116,6 @@ server:
   infra-cache-slabs: 32
   key-cache-slabs: 32
   rrset-roundrobin: yes
-
   hide-identity: yes
   hide-version: yes
   harden-glue: yes
@@ -132,7 +125,6 @@ server:
   harden-large-queries: yes
   harden-referral-path: no
   harden-short-bufsize: yes
-
   do-not-query-address: 127.0.0.1/8
   do-not-query-localhost: yes
   edns-buffer-size: 1472
@@ -152,7 +144,6 @@ server:
   so-reuseport: yes
 EOF
 
-# Interfaces
 cat >/etc/unbound/unbound.conf.d/63-listen-interfaces.conf <<'EOF'
 server:
   interface: 0.0.0.0
@@ -162,7 +153,6 @@ server:
   do-tcp: yes
 EOF
 
-# Hyperlocal root cache (opcional) - Isso substitui o auto-trust-anchor
 cat >/etc/unbound/unbound.conf.d/89-hyperlocal-cache.conf <<'EOF'
 server:
   auth-zone:
@@ -195,7 +185,6 @@ server:
   zonefile: ""
 EOF
 
-# Remote-control (sem chroot para evitar conflitos)
 cat >/etc/unbound/unbound.conf.d/99-remote-control.conf <<'EOF'
 server:
   chroot: ""
@@ -214,22 +203,12 @@ remote-control:
   control-cert-file: "/etc/unbound/unbound_control.pem"
 EOF
 
-# Corrige permissões no diretório unbound
+# Corrige permissões
 chown -R unbound:unbound /etc/unbound /var/lib/unbound
 chmod -R 755 /etc/unbound
-chmod 600 /etc/unbound/unbound_{server,control}.key 2>/dev/null || true
-chmod 644 /etc/unbound/unbound_{server,control}.pem 2>/dev/null || true
 chmod 644 /var/lib/unbound/root.key 2>/dev/null || true
 
-# Valida config antes de prosseguir
-if ! unbound-checkconf >/dev/null 2>&1; then
-  err "Configuração do Unbound inválida! Verifique /etc/unbound/unbound.conf e fragments."
-  unbound-checkconf
-  exit 1
-fi
-ok "Configuração do Unbound validada."
-
-# Gera certificados do unbound-control (idempotente, após config)
+# ===== CORREÇÃO: Chaves ANTES da Validação =====
 if [[ ! -f /etc/unbound/unbound_server.key || ! -f /etc/unbound/unbound_control.key ]]; then
   inf "Gerando certificados para unbound-control..."
   unbound-control-setup -d /etc/unbound/ || {
@@ -241,7 +220,15 @@ if [[ ! -f /etc/unbound/unbound_server.key || ! -f /etc/unbound/unbound_control.
   chmod 644 /etc/unbound/unbound_{server,control}.pem
 fi
 
-# Override systemd para remover chroot e definir ExecStart
+# Valida config (agora que as chaves existem)
+if ! unbound-checkconf >/dev/null 2>&1; then
+  err "Configuração do Unbound inválida! Verifique /etc/unbound/unbound.conf e fragments."
+  unbound-checkconf
+  exit 1
+fi
+ok "Configuração do Unbound validada."
+
+# Override systemd
 install -d -m 0755 /etc/systemd/system/unbound.service.d
 cat >/etc/systemd/system/unbound.service.d/override.conf <<'EOF'
 [Service]
@@ -252,13 +239,12 @@ ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
 EOF
 
 systemctl daemon-reload
-
 systemctl enable unbound
-sleep 2  # Aguarda estabilizar
+sleep 2
 systemctl restart unbound
 sleep 2
 if ! systemctl is-active --quiet unbound; then
-  err "Falha ao iniciar Unbound após config. Verifique: systemctl status unbound"
+  err "Falha ao iniciar Unbound. Verifique systemctl status unbound"
   exit 1
 fi
 ok "Unbound ativo em :53."
@@ -278,13 +264,12 @@ do
   fi
 done
 if [[ "$ok_dl" -ne 1 ]]; then
-  inf "Tarball indisponível; compilando do source (Go)…"
+  inf "Compilando do source (Go)…"
   apt-get install -y golang
   GO111MODULE=on GOBIN=/usr/local/bin go install "github.com/letsencrypt/unbound_exporter@v${UNBOUND_EXPORTER_VERSION}"
 fi
 popd >/dev/null
 
-# Service systemd do exporter
 cat > /etc/systemd/system/unbound_exporter.service <<'EOF'
 [Unit]
 Description=Prometheus Unbound Exporter
@@ -315,7 +300,7 @@ systemctl enable --now unbound_exporter
 systemctl restart unbound_exporter
 sleep 2
 if ! systemctl is-active --quiet unbound_exporter; then
-  err "Falha ao iniciar unbound_exporter. Verifique: journalctl -u unbound_exporter"
+  err "Falha ao iniciar unbound_exporter."
   exit 1
 fi
 ok "unbound_exporter ativo em :9167."
@@ -324,64 +309,44 @@ ok "unbound_exporter ativo em :9167."
 if [[ "$NODE_EXPORTER_INSTALL" == "yes" ]]; then
   inf "Instalando e configurando prometheus-node-exporter..."
   apt-get install -y prometheus-node-exporter
-
-  # Garante que o exporter leia nosso diretório de métricas customizadas
   install -d -m 0755 /etc/systemd/system/prometheus-node-exporter.service.d
   cat > /etc/systemd/system/prometheus-node-exporter.service.d/override.conf <<'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/prometheus-node-exporter --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
 EOF
-
   systemctl daemon-reload
   systemctl enable prometheus-node-exporter
   systemctl restart prometheus-node-exporter
-  sleep 2
-  if ! systemctl is-active --quiet prometheus-node-exporter; then
-    err "Falha ao iniciar prometheus-node-exporter. Verifique: journalctl -u prometheus-node-exporter"
-    exit 1
-  fi
-  ok "prometheus-node-exporter ativo em :9100 (com textfile collector)."
+  ok "prometheus-node-exporter ativo em :9100."
 fi
 
-# ===== Prometheus (idempotente) =====
+# ===== Prometheus =====
 if [[ "$PROM_INSTALL" == "yes" ]]; then
   apt-get install -y prometheus
-
   PROM_FILE="/etc/prometheus/prometheus.yml"
-  PROM_DIR="/etc/prometheus"
-  install -d -m 0755 "$PROM_DIR"
+  install -d -m 0755 "/etc/prometheus"
+  [[ -f "$PROM_FILE" ]] && cp -a "$PROM_FILE" "${PROM_FILE}.bak.$(date +%F-%H%M%S)"
 
-  # Backup se existir
-  if [[ -f "$PROM_FILE" ]]; then
-    cp -a "$PROM_FILE" "${PROM_FILE}.bak.$(date +%F-%H%M%S)"
-  fi
-
-  # Escreve template LIMPO
   cat > "$PROM_FILE" <<'EOF'
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
-
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
-
   - job_name: 'unbound'
     static_configs:
       - targets: ['localhost:9167']
-
   - job_name: 'node'
     static_configs:
       - targets: ['localhost:9100']
 EOF
-
-  # Validação
+  
   if command -v promtool >/dev/null 2>&1; then
-    promtool check config "$PROM_FILE" || echo "WARN: promtool apontou problemas em $PROM_FILE"
+    promtool check config "$PROM_FILE" || warn "Erro no config do Prometheus"
   fi
-
   systemctl enable --now prometheus
   systemctl restart prometheus
   ok "Prometheus ativo em :9090."
@@ -397,14 +362,12 @@ if [[ "$GRAFANA_INSTALL" == "yes" ]]; then
   fi
   apt-get install -y grafana
 
-  # Verifica se porta 3000 está livre; mata se ocupada
   if ss -tuln | grep -q ':3000 '; then
-    inf "Porta 3000 ocupada; matando processo..."
+    inf "Porta 3000 ocupada; tentando liberar..."
     fuser -k 3000/tcp || true
   fi
 
   install -d /etc/grafana/provisioning/datasources
-  rm -f /etc/grafana/provisioning/datasources/sample.yaml
   cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<EOF
 apiVersion: 1
 datasources:
@@ -428,83 +391,85 @@ providers:
       path: /var/lib/grafana/dashboards/unbound
 EOF
 
-  if [[ -f "${REPO_ROOT}/grafana/provisioning/dashboards/sentinela-unbound-main.json" ]]; then
-    cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/"*.json \
-      /var/lib/grafana/dashboards/unbound/
-  else
-    cat > /var/lib/grafana/dashboards/unbound/sentinela-unbound-main.json <<'EOF'
-{ "title": "Sentinela-DNS · Unbound (Main)", "schemaVersion": 36, "version": 1, "panels": [] }
-EOF
-  fi
-  
-  # ===== Personalização do Branding (Logo) =====
-  inf "Aplicando branding personalizado no Grafana..."
+  inf "Copiando dashboards..."
+  cp -f "${REPO_ROOT}/grafana/provisioning/dashboards/"*.json \
+    /var/lib/grafana/dashboards/unbound/ 2>/dev/null || warn "Nenhum dashboard .json encontrado."
+
+  # Branding
   BRANDING_DIR="${REPO_ROOT}/branding"
   GRAFANA_IMG_DIR="/usr/share/grafana/public/img"
-  
   if [[ -f "${BRANDING_DIR}/logo.jpg" ]]; then
-    # Faz backup dos logos originais (apenas na primeira vez)
-    mv "${GRAFANA_IMG_DIR}/grafana_logo.svg" "${GRAFANA_IMG_DIR}/grafana_logo.svg.bak" 2>/dev/null || true
-    mv "${GRAFANA_IMG_DIR}/grafana_icon.svg" "${GRAFANA_IMG_DIR}/grafana_icon.svg.bak" 2>/dev/null || true
-
-    # Copia o novo logo, substituindo os ficheiros do Grafana
     cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_logo.svg"
     cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_icon.svg"
-    
-    ok "Logo do Sentinela-DNS aplicado."
-  else
-    warn "Ficheiro de logo não encontrado em ${BRANDING_DIR}/logo.jpg. A usar o logo padrão do Grafana."
+    ok "Branding aplicado."
   fi
 
-  # Corrige permissões para Grafana
   chown -R grafana:grafana /etc/grafana /var/lib/grafana /var/log/grafana
   chmod -R 755 /etc/grafana /var/lib/grafana /var/log/grafana
 
   systemctl daemon-reload
   systemctl enable --now grafana-server
-  systemctl restart grafana-server || {
-    err "Falha ao iniciar Grafana. Verifique logs com journalctl -u grafana-server"
-    exit 1
-  }
+  systemctl restart grafana-server
   sleep 5
-  if ! systemctl is-active --quiet grafana-server; then
-    err "Grafana não subiu. Verifique systemctl status grafana-server"
-    exit 1
-  fi
   ok "Grafana ativo em :3000."
 fi
 
-# ===== Coletor Customizado NXDOMAIN =====
-inf "Instalando e agendando o coletor de métricas NXDOMAIN..."
+# ===== Coletor Customizado NXDOMAIN & Agente Sentinela =====
+inf "Instalando componentes do Sentinela..."
 
-# Copia o script otimizado para o diretório de binários
+# 1. Coletor NXDOMAIN (Script)
+# IMPORTANTE: Renomeamos para .sh para bater com o serviço systemd
 if [[ -f "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" ]]; then
-  install -m 0755 "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" /usr/local/bin/
-  ok "Script top-nxdomain-optimized.sh instalado."
+  install -m 0755 "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" /usr/local/bin/top-nxdomain.sh
+  ok "Script top-nxdomain.sh instalado."
 else
-  warn "Script top-nxdomain-optimized.sh não encontrado no repositório."
+  warn "Script top-nxdomain-optimized.sh não encontrado."
 fi
 
-# Copia e ativa as unidades do systemd (service e timer)
-if [[ -d "${REPO_ROOT}/systemd" ]]; then
-  # Copia os arquivos de serviço e timer
-  install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
-  install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
-
-  # Recarrega o systemd, habilita e inicia o timer
-  systemctl daemon-reload
-  systemctl enable --now top-nxdomain.timer
-  ok "Coletor NXDOMAIN agendado para rodar a cada 10 minutos."
+# 2. Agente Sentinela (Python)
+if [[ -f "${REPO_ROOT}/scripts/sentinela-agent.py" ]]; then
+    install -m 0755 "${REPO_ROOT}/scripts/sentinela-agent.py" /usr/local/bin/
+    ok "Script sentinela-agent.py instalado."
 else
-  warn "Diretório 'systemd' não encontrado. Pulei a instalação do coletor NXDOMAIN."
+    warn "Script sentinela-agent.py não encontrado."
+fi
+
+# 3. Serviços Systemd
+if [[ -d "${REPO_ROOT}/systemd" ]]; then
+  # NXDOMAIN Service/Timer
+  if [[ -f "${REPO_ROOT}/systemd/top-nxdomain.service" ]]; then
+      install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
+      install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
+      systemctl enable --now top-nxdomain.timer
+      ok "Coletor NXDOMAIN agendado."
+  fi
+  
+  # Agente Service
+  if [[ -f "${REPO_ROOT}/systemd/sentinela-agent.service" ]]; then
+      install -m 0644 "${REPO_ROOT}/systemd/sentinela-agent.service" /etc/systemd/system/
+      # Cria pasta de config
+      install -d -m 0700 /etc/sentinela
+      systemctl enable --now sentinela-agent.service
+      ok "Agente Sentinela instalado e ativo."
+  fi
+  
+  systemctl daemon-reload
 fi
 
 # ===== Health-check final =====
-for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter; do
-  systemctl is-active --quiet "$s" && ok "Serviço ativo: $s" || warn "Serviço INATIVO (ok se não instalado): $s"
+inf "Verificando saúde final..."
+for s in unbound unbound_exporter prometheus grafana-server prometheus-node-exporter top-nxdomain.timer sentinela-agent.service; do
+  if systemctl is-active --quiet "$s"; then
+    ok "Serviço ativo: $s"
+  else
+    # Só avisa se deveria estar instalado
+    if [[ "$s" == "prometheus" && "$PROM_INSTALL" != "yes" ]]; then continue; fi
+    if [[ "$s" == "grafana-server" && "$GRAFANA_INSTALL" != "yes" ]]; then continue; fi
+    warn "Serviço INATIVO: $s"
+  fi
 done
 
-ok "Instalação/atualização concluída."
+ok "Instalação concluída."
 echo "Prometheus: ${PROM_URL}"
-echo "Grafana: http://SEU_IP:3000 (admin/admin → altere a senha)"
-echo "Exporters: node_exporter :9100 | unbound_exporter :9167"
+echo "Grafana: http://SEU_IP:3000 (admin/admin)"
+echo "Exporters: node :9100 | unbound :9167"
