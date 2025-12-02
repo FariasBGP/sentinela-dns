@@ -10,6 +10,7 @@ import subprocess
 import time
 import configparser
 from contextlib import contextmanager
+from collections import deque  # SECURITY FIX: Efficient memory handling
 
 # --- Configuração Dinâmica ---
 # Permite passar o ficheiro de configuração como argumento (para modo Híbrido)
@@ -52,23 +53,47 @@ def read_config():
 def fetch_remote_config(url, api_key):
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
+        # SECURITY FIX: Timeout prevents hanging indefinitely
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"ERRO: Falha na API: {e}")
+        return None
+    except Exception as e:
+        print(f"ERRO: Erro inesperado na API: {e}")
         return None
 
 def fetch_external_blocklist(url_list):
     if not url_list: return set()
+    
+    # SECURITY FIX: Limit total lines to prevent OOM
+    MAX_LINES = 500000 
+    total_lines = 0
+    final_set = set()
+
     for url in url_list:
         try:
             print(f"  A baixar lista externa: {url}")
-            r = requests.get(url, timeout=15); r.raise_for_status()
-            return set(line.strip() for line in r.text.splitlines() if line.strip())
+            # SECURITY FIX: Stream content to avoid loading 1GB+ into RAM
+            with requests.get(url, stream=True, timeout=15) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if total_lines >= MAX_LINES:
+                        print(f"  AVISO: Limite de linhas ({MAX_LINES}) atingido. Parando download.")
+                        return final_set
+                    
+                    if line:
+                        decoded_line = line.decode('utf-8', errors='ignore').strip()
+                        if decoded_line:
+                            final_set.add(decoded_line)
+                            total_lines += 1
+        except requests.exceptions.RequestException as e:
+             print(f"  AVISO: Falha de rede em {url}: {e}")
         except Exception as e:
-            print(f"  AVISO: Falha em {url}: {e}")
-    return None
+            print(f"  AVISO: Erro genérico em {url}: {e}")
+            
+    return final_set
 
 # --- LÓGICA RECURSIVA (UNBOUND) ---
 def apply_recursive(config):
@@ -108,8 +133,9 @@ def apply_recursive(config):
                     f.write(f"  local-data: \"{d} AAAA {redirect_v6}\"\n")
     except Exception as e: print(f"Erro blocklist: {e}")
 
-    if subprocess.run(['unbound-checkconf'], capture_output=True).returncode == 0:
-        subprocess.run(['systemctl', 'restart', 'unbound'])
+    if subprocess.run(['unbound-checkconf'], capture_output=True, timeout=30).returncode == 0:
+        # SECURITY FIX: Timeout added to subprocess
+        subprocess.run(['systemctl', 'restart', 'unbound'], timeout=30)
         print("Unbound recarregado.")
 
 # --- LÓGICA AUTORITATIVA (NSD) ---
@@ -156,8 +182,9 @@ def apply_authoritative(config):
                     f.write(f"{h}\tIN\t{reg['tipo']}\t{v}\n")
         except Exception as e: print(f"Erro escrita zona {z['nome']}: {e}")
 
-    subprocess.run(['systemctl', 'enable', 'nsd'], capture_output=True)
-    subprocess.run(['systemctl', 'restart', 'nsd'], capture_output=True)
+    # SECURITY FIX: Timeouts added
+    subprocess.run(['systemctl', 'enable', 'nsd'], capture_output=True, timeout=30)
+    subprocess.run(['systemctl', 'restart', 'nsd'], capture_output=True, timeout=30)
     print("NSD recarregado.")
 
 def get_current_state():
@@ -174,15 +201,25 @@ def write_new_state(state_data):
 def main_loop():
     base_name = os.path.basename(CONFIG_FILE)
     with Mbox(f"Sentinela-Agente Iniciado ({base_name})"): pass
+    
+    # SECURITY FIX: Circuit Breaker / Backoff
+    fail_count = 0
+    MAX_BACKOFF = 300  # 5 minutes max
+
     while True:
         try:
             api_url, api_key = read_config()
-            if not api_url: time.sleep(POLL_INTERVAL); continue
+            if not api_url: 
+                time.sleep(POLL_INTERVAL)
+                continue
             
             print("Verificando API...")
             remote = fetch_remote_config(api_url, api_key)
             
             if remote:
+                # Success - reset backoff
+                fail_count = 0
+                
                 current = get_current_state()
                 r_clean = remote.copy()
                 if 'cached_ext_list' in r_clean: del r_clean['cached_ext_list']
@@ -194,15 +231,31 @@ def main_loop():
                 else:
                     mode = remote.get('mode')
                     if mode == 'recursive':
-                        # Não desligamos o NSD aqui para permitir operação híbrida
-                        subprocess.run(['systemctl', 'start', 'unbound'], capture_output=True)
+                        # SECURITY FIX: Timeout
+                        subprocess.run(['systemctl', 'start', 'unbound'], capture_output=True, timeout=30)
                         apply_recursive(remote)
                     elif mode == 'authoritative':
-                        # Não desligamos o Unbound aqui para permitir operação híbrida
                         apply_authoritative(remote)
                     
                     write_new_state(remote)
-        except Exception as e: print(f"Erro loop: {e}")
+            else:
+                # API failure logic
+                fail_count += 1
+                backoff = min(POLL_INTERVAL * (2 ** (fail_count - 1)), MAX_BACKOFF)
+                print(f"Falha na API. Tentativa {fail_count}. Aguardando {backoff}s...")
+                time.sleep(backoff)
+                continue
+
+        except KeyboardInterrupt:
+            print("\nParando agente...")
+            sys.exit(0)
+        except Exception as e: 
+            print(f"Erro crítico no loop: {e}")
+            fail_count += 1
+            backoff = min(POLL_INTERVAL * (2 ** (fail_count - 1)), MAX_BACKOFF)
+            time.sleep(backoff)
+            continue
+            
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
