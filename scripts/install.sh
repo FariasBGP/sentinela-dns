@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sentinela-DNS — install.sh
 # Instala/atualiza Unbound + Exporters + Prometheus + Grafana + Agente (Debian 12/13).
+# Nível de Segurança: Hardened (Systemd Sandbox + Auto-patch)
 
 set -euo pipefail
 
@@ -371,18 +372,26 @@ fi
 # ===== Agente Sentinela (INTERATIVO) =====
 inf "Instalando componentes do Sentinela..."
 
-# 1. Script NXDOMAIN
+# 1. Script NXDOMAIN (Mantém lógica original)
 if [[ -f "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" ]]; then
   install -m 0755 "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" /usr/local/bin/top-nxdomain.sh
 fi
 
-# 2. Script Agente
+# 2. Script Agente (Modified with Patch)
 if [[ -f "${REPO_ROOT}/scripts/sentinela-agent.py" ]]; then
-    install -m 0755 "${REPO_ROOT}/scripts/sentinela-agent.py" /usr/local/bin/
+    target_bin="/usr/local/bin/sentinela-agent.py"
+    install -m 0700 "${REPO_ROOT}/scripts/sentinela-agent.py" "$target_bin"
+    
+    # AUTO-CORREÇÃO: Remove o import alucinado pela IA (deque)
+    sed -i '/from collections import deque/d' "$target_bin"
+    ok "Script sentinela-agent.py instalado e saneado em $target_bin"
+else
+    warn "Script sentinela-agent.py não encontrado."
 fi
 
-# 3. Configuração do Agente (INTERATIVA)
+# 3. Configuração do Agente (Modified with Patch)
 install -d -m 0700 /etc/sentinela
+install -d -m 0700 /var/lib/sentinela # Garante diretório de estado para o Sandbox
 
 if [[ ! -f "/etc/sentinela/agent.conf" ]]; then
     echo ""
@@ -400,6 +409,11 @@ if [[ ! -f "/etc/sentinela/agent.conf" ]]; then
 [api]
 url = ${API_URL_DEFAULT}
 key = ${USER_API_KEY}
+
+[settings]
+bind_ip = 0.0.0.0
+redirect_ip_v4 = 127.0.0.1
+redirect_ip_v6 = ::1
 EOF
         chmod 600 /etc/sentinela/agent.conf
         ok "Arquivo de configuração agent.conf criado."
@@ -410,21 +424,46 @@ else
     inf "Arquivo agent.conf já existe. Mantendo configuração atual."
 fi
 
-# 4. Serviços Systemd
-if [[ -d "${REPO_ROOT}/systemd" ]]; then
-  if [[ -f "${REPO_ROOT}/systemd/top-nxdomain.service" ]]; then
-      install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
-      install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
-      systemctl enable --now top-nxdomain.timer
-  fi
-  
-  if [[ -f "${REPO_ROOT}/systemd/sentinela-agent.service" ]]; then
-      install -m 0644 "${REPO_ROOT}/systemd/sentinela-agent.service" /etc/systemd/system/
-      systemctl enable --now sentinela-agent.service
-      ok "Agente Sentinela ativo."
-  fi
-  systemctl daemon-reload
+# 4. Serviços Systemd (Hardened Generation)
+inf "Aplicando Systemd Hardening..."
+
+# Timer NXDOMAIN
+if [[ -f "${REPO_ROOT}/systemd/top-nxdomain.service" ]]; then
+    install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
+    install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
+    systemctl enable --now top-nxdomain.timer
 fi
+
+# Service Agent BLINDADO
+cat > /etc/systemd/system/sentinela-agent.service <<EOF
+[Unit]
+Description=Sentinela-DNS Agent (Hardened)
+After=network-online.target unbound.service nsd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sentinela-agent.py
+Restart=on-failure
+RestartSec=10s
+
+# --- SECURITY SANDBOX ---
+ProtectSystem=strict
+ReadWritePaths=/etc/unbound/unbound.conf.d /etc/nsd /var/lib/sentinela /run/sentinela /etc/sentinela
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now sentinela-agent.service
+ok "Agente Sentinela instalado, blindado e ativo."
 
 ok "Instalação concluída."
 echo "Grafana: http://SEU_IP:3000"
