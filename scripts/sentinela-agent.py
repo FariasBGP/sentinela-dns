@@ -10,7 +10,6 @@ import subprocess
 import time
 import configparser
 from contextlib import contextmanager
-from collections import deque  # SECURITY FIX: Efficient memory handling
 
 # --- Configuração Dinâmica ---
 # Permite passar o ficheiro de configuração como argumento (para modo Híbrido)

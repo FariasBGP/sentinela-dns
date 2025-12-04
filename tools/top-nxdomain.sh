@@ -1,74 +1,82 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 export LC_ALL=C LANG=C
+umask 022
 
-# Configurações
-DURATION="30"
-TOPN="20"
+WINDOW="${1:-12h}"
+TOPN="${2:-20}"
 OUTDIR="/var/lib/node_exporter/textfile_collector"
 OUT="${OUTDIR}/sentinela_nxdomain.prom"
-TMP_PCAP="/tmp/nxdomain_capture.pcap"
-TMP_TXT="/tmp/nxdomain_parsed.txt"
-TMP_PROM="${OUT}.tmp.$$"
+TMP="${OUT}.tmp.$$"
 
 mkdir -p "$OUTDIR"
+chown prometheus:prometheus "$OUTDIR" || true
+chmod 755 "$OUTDIR" || true
 
-# 1. CAPTURA
-# Captura pacotes UDP na porta 53
-timeout "$DURATION" tcpdump -tnn -vv -i any -s 0 -w "$TMP_PCAP" udp src port 53 2>/dev/null || true
+# Limita linhas pra 100.000 para maior cobertura em tráfego alto (ajuste se necessário)
+total_nxdomain() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' | wc -l | tr -d ' ' || echo 0
+}
 
-# 2. ANÁLISE
-# Converte para texto
-tcpdump -nn -vv -r "$TMP_PCAP" 2>/dev/null > "$TMP_TXT"
+# Função otimizada para top IPs: extrai apenas o campo do IP após "info: "
+top_ips() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' \
+    | awk '/info:/ {print $8}' \
+    | sort | uniq -c | sort -nr | head -"$TOPN" || true
+}
 
-# Filtra apenas linhas com NXDomain
-grep "NXDomain" "$TMP_TXT" > "${TMP_TXT}.clean"
+# Função corrigida para top domínios: extrai o domínio após o IP, removendo o ponto final
+top_domains() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' \
+    | awk '/info:/ {sub(/\.$/,"",$9); print $9}' \
+    | sort | uniq -c | sort -nr | head -"$TOPN" || true
+}
 
-# Calcula Total
-TOTAL=$(wc -l < "${TMP_TXT}.clean")
+# Executa em paralelo
+top_ips > "${TMP}.ips" &
+top_domains > "${TMP}.doms" &
+TOTAL="$(total_nxdomain)"
+wait
 
-# --- EXTRAÇÃO DE IPs (Mantida) ---
-# Pega o IP de destino (o cliente)
-IPS=$(cat "${TMP_TXT}.clean" \
-  | sed -n 's/.* > \([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\)\.[0-9]*:.*/\1/p' \
-  | sort | uniq -c | sort -nr | head -n "$TOPN")
+IPS="$(cat "${TMP}.ips")"
+DOMS="$(cat "${TMP}.doms")"
+rm -f "${TMP}.ips" "${TMP}.doms"
 
-# --- EXTRAÇÃO DE DOMÍNIOS (CORRIGIDA) ---
-# Procura por " q: " seguido de qualquer coisa até um espaço e "?" (ex: A?), e pega o que vem a seguir
-DOMS=$(cat "${TMP_TXT}.clean" \
-  | sed -nE 's/.* q: [A-Za-z]+\? ([a-zA-Z0-9._-]+).*/\1/p' \
-  | sed 's/\.$//' \
-  | sort | uniq -c | sort -nr | head -n "$TOPN")
+# Debug: Imprime no terminal pra teste
+echo "DEBUG: Total NXDOMAIN: ${TOTAL}"
+echo "DEBUG: Top IPs:"
+echo "${IPS}"
+echo "DEBUG: Top Domains:"
+echo "${DOMS}"
 
-# 3. GERA MÉTRICAS
+# Emite métricas com melhorias: adiciona timestamp se necessário, escapa corretamente
 {
-  echo "# HELP sentinela_nxdomain_total Total NXDOMAIN na amostra"
+  echo "# HELP sentinela_nxdomain_total Total de respostas NXDOMAIN na janela de tempo"
   echo "# TYPE sentinela_nxdomain_total gauge"
-  echo "sentinela_nxdomain_total{window=\"12h\"} ${TOTAL}"
-
-  echo "# HELP sentinela_nxdomain_ip_count Top IPs recebendo NXDOMAIN"
+  echo "sentinela_nxdomain_total{window=\"${WINDOW}\"} ${TOTAL}"
+  echo
+  echo "# HELP sentinela_nxdomain_ip_count Contagem de NXDOMAIN por IP de origem na janela de tempo"
   echo "# TYPE sentinela_nxdomain_ip_count gauge"
   if [ -n "${IPS}" ]; then
-    echo "${IPS}" | while read -r count ip; do
+    while read -r c ip; do
       [ -z "${ip}" ] && continue
-      echo "sentinela_nxdomain_ip_count{ip=\"${ip}\",window=\"12h\"} ${count}"
-    done
+      echo "sentinela_nxdomain_ip_count{ip=\"${ip}\",window=\"${WINDOW}\"} ${c}"
+    done <<< "$IPS"
   fi
-
-  echo "# HELP sentinela_nxdomain_domain_count Top Domínios gerando NXDOMAIN"
+  echo
+  echo "# HELP sentinela_nxdomain_domain_count Contagem de NXDOMAIN por domínio na janela de tempo"
   echo "# TYPE sentinela_nxdomain_domain_count gauge"
   if [ -n "${DOMS}" ]; then
-    echo "${DOMS}" | while read -r count dom; do
+    while read -r c dom; do
       [ -z "${dom}" ] && continue
-      # Escapa aspas para o formato Prometheus
-      dom_esc="${dom//\"/\\\"}"
-      echo "sentinela_nxdomain_domain_count{domain=\"${dom_esc}\",window=\"12h\"} ${count}"
-    done
+      dom_esc="${dom//\\/\\\\}"
+      dom_esc="${dom_esc//\"/\\\"}"
+      echo "sentinela_nxdomain_domain_count{domain=\"${dom_esc}\",window=\"${WINDOW}\"} ${c}"
+    done <<< "$DOMS"
   fi
-} > "$TMP_PROM"
+} > "$TMP"
 
-# 4. FINALIZAÇÃO
-mv "$TMP_PROM" "$OUT"
+sed -i 's/\r$//' "$TMP" || true
+install -m 0644 "$TMP" "$OUT"
 chown prometheus:prometheus "$OUT" || true
-chmod 644 "$OUT"
-rm -f "$TMP_PCAP" "$TMP_TXT" "${TMP_TXT}.clean" "$TMP_PROM"
+rm -f "$TMP"
