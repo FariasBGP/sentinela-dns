@@ -17,7 +17,7 @@ DEBIAN_FRONTEND=noninteractive; export DEBIAN_FRONTEND
 
 # Versões
 UNBOUND_EXPORTER_VERSION="${UNBOUND_EXPORTER_VERSION:-0.4.6}"
-GOFLOW2_VERSION="${GOFLOW2_VERSION:-2.2.3}" # Atualizado para versão existente
+GOFLOW2_VERSION="${GOFLOW2_VERSION:-2.2.3}" # Versão estável do Coletor
 PROM_URL="${PROM_URL:-http://localhost:9090}"
 API_URL_DEFAULT="https://api-sentinela.bgpconsultoria.com.br/api/v1/config"
 
@@ -253,7 +253,6 @@ EOF
 Description=Sentinela-DNS Agent (Recursivo)
 After=network-online.target unbound.service
 Wants=network-online.target
-
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sentinela-agent.py
@@ -274,7 +273,6 @@ EOF
 Description=Sentinela-DNS Agent (Autoritativo)
 After=network-online.target nsd.service
 Wants=network-online.target
-
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sentinela-agent.py /etc/sentinela/agent-auth.conf
@@ -320,7 +318,7 @@ Description=Sentinela-Flow (NetFlow Collector)
 After=network.target
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/goflow2 -listen "netflow://:2055" -metrics.addr ":9191" -loglevel "error"
+ExecStart=/usr/local/bin/goflow2 -listen "netflow://:2055" -addr ":9191" -transport "file" -transport.file "/var/log/goflow.log"
 Nice=19
 CPUSchedulingPolicy=idle
 Restart=on-failure
@@ -331,6 +329,38 @@ EOF
         systemctl daemon-reload
         systemctl enable --now sentinela-flow.service
         ok "Módulo Flow ativo na porta 2055."
+        
+        # Script Analisador
+        if [[ -f "${REPO_ROOT}/tools/flow-analyzer.sh" ]]; then
+            install -m 0755 "${REPO_ROOT}/tools/flow-analyzer.sh" /usr/local/bin/flow-analyzer.sh
+        elif [[ -f "/usr/local/bin/flow-analyzer.sh" ]]; then
+             ok "Analisador já presente."
+        else
+             warn "Script flow-analyzer.sh não encontrado no repositório. O painel de ameaças pode não funcionar."
+        fi
+
+        # Service e Timer para o Analisador
+        cat > /etc/systemd/system/sentinela-threats.service <<EOF
+[Unit]
+Description=Sentinela Threats Analyzer
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/flow-analyzer.sh
+EOF
+        cat > /etc/systemd/system/sentinela-threats.timer <<EOF
+[Unit]
+Description=Roda analisador de ameaças a cada 2 min
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=sentinela-threats.service
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now sentinela-threats.timer
+        ok "Analisador de Ameaças agendado."
     else
         err "Falha ao baixar GoFlow2. URL: $GOFLOW_URL"
         warn "O módulo de Flow não será iniciado."
