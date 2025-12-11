@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Sentinela-DNS — Agente v3.2 (Híbrido + Fix Nomes de Zona)
+# Sentinela-DNS — Agente v4.0 (Suporte a ACLs Dinâmicas e Flow)
 #
 import requests
 import json
@@ -12,10 +12,8 @@ import configparser
 from contextlib import contextmanager
 
 # --- Configuração Dinâmica ---
-# Permite passar o ficheiro de configuração como argumento (para modo Híbrido)
 if len(sys.argv) > 1:
     CONFIG_FILE = sys.argv[1]
-    # Cria um ficheiro de estado único para esta instância
     STATE_FILE = f"/var/lib/sentinela/state_{os.path.basename(CONFIG_FILE)}.json"
 else:
     CONFIG_FILE = "/etc/sentinela/agent.conf"
@@ -26,6 +24,9 @@ POLL_INTERVAL = 60
 # Caminhos Unbound
 UNBOUND_BLOCK_FILE = "/etc/unbound/unbound.conf.d/92-sentinela-blocklist.conf"
 UNBOUND_IFACE_FILE = "/etc/unbound/unbound.conf.d/63-listen-interfaces.conf"
+# NOVOS ARQUIVOS DE ACL
+UNBOUND_ACL_LOCALS = "/etc/unbound/unbound.conf.d/51-acls-locals.conf"
+UNBOUND_ACL_TRUSTEDS = "/etc/unbound/unbound.conf.d/52-acls-trusteds.conf"
 
 # Caminhos NSD
 NSD_CONF_DIR = "/etc/nsd"
@@ -52,7 +53,6 @@ def read_config():
 def fetch_remote_config(url, api_key):
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
-        # SECURITY FIX: Timeout prevents hanging indefinitely
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
@@ -65,8 +65,6 @@ def fetch_remote_config(url, api_key):
 
 def fetch_external_blocklist(url_list):
     if not url_list: return set()
-    
-    # SECURITY FIX: Limit total lines to prevent OOM
     MAX_LINES = 500000 
     total_lines = 0
     final_set = set()
@@ -74,23 +72,19 @@ def fetch_external_blocklist(url_list):
     for url in url_list:
         try:
             print(f"  A baixar lista externa: {url}")
-            # SECURITY FIX: Stream content to avoid loading 1GB+ into RAM
             with requests.get(url, stream=True, timeout=15) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
                     if total_lines >= MAX_LINES:
-                        print(f"  AVISO: Limite de linhas ({MAX_LINES}) atingido. Parando download.")
+                        print(f"  AVISO: Limite atingido ({MAX_LINES}). Parando.")
                         return final_set
-                    
                     if line:
                         decoded_line = line.decode('utf-8', errors='ignore').strip()
                         if decoded_line:
                             final_set.add(decoded_line)
                             total_lines += 1
-        except requests.exceptions.RequestException as e:
-             print(f"  AVISO: Falha de rede em {url}: {e}")
         except Exception as e:
-            print(f"  AVISO: Erro genérico em {url}: {e}")
+            print(f"  AVISO: Erro na lista {url}: {e}")
             
     return final_set
 
@@ -98,6 +92,7 @@ def fetch_external_blocklist(url_list):
 def apply_recursive(config):
     print(">>> Modo: RECURSIVO (Unbound)")
     
+    # 1. Interfaces
     bind_ips = config['settings'].get('bind_ip', '0.0.0.0').split()
     try:
         with open(UNBOUND_IFACE_FILE, 'w') as f:
@@ -107,11 +102,38 @@ def apply_recursive(config):
             f.write("  port: 53\n  do-udp: yes\n  do-tcp: yes\n")
     except Exception as e: print(f"Erro interfaces: {e}")
 
+    # 2. ACLs (Redes do Cliente) - NOVO!
+    acls = config.get('acls', {})
+    
+    # Arquivo 51: Redes Locais/CGNAT/Infra
+    try:
+        with open(UNBOUND_ACL_LOCALS, 'w') as f:
+            f.write("server:\n")
+            # Sempre permite localhost
+            f.write("  access-control: 127.0.0.1/32 allow\n")
+            f.write("  access-control: ::1/128 allow\n")
+            
+            for cidr in acls.get('locals', []):
+                if cidr.strip():
+                    f.write(f"  access-control: {cidr.strip()} allow\n")
+    except Exception as e: print(f"Erro ACL Locals: {e}")
+
+    # Arquivo 52: Redes Públicas/Trusteds
+    try:
+        with open(UNBOUND_ACL_TRUSTEDS, 'w') as f:
+            f.write("server:\n")
+            for cidr in acls.get('trusteds', []):
+                if cidr.strip():
+                    f.write(f"  access-control: {cidr.strip()} allow\n")
+    except Exception as e: print(f"Erro ACL Trusteds: {e}")
+
+    # 3. Blocklists
     priv_list = set(config.get('blocklist_private', []))
     ext_urls = config.get('blocklist_external_urls', [])
-    ext_list = set()
     
+    ext_list = set()
     if ext_urls:
+        # Tenta usar cache se falhar download
         cached = get_current_state().get('cached_ext_list', []) if get_current_state() else []
         res = fetch_external_blocklist(ext_urls)
         ext_list = res if res is not None else set(cached)
@@ -132,15 +154,16 @@ def apply_recursive(config):
                     f.write(f"  local-data: \"{d} AAAA {redirect_v6}\"\n")
     except Exception as e: print(f"Erro blocklist: {e}")
 
+    # Recarrega Unbound se config válida
     if subprocess.run(['unbound-checkconf'], capture_output=True, timeout=30).returncode == 0:
-        # SECURITY FIX: Timeout added to subprocess
         subprocess.run(['systemctl', 'restart', 'unbound'], timeout=30)
-        print("Unbound recarregado.")
+        print("Unbound recarregado com novas regras.")
+    else:
+        print("ERRO CRÍTICO: Configuração do Unbound inválida. Não recarregado.")
 
 # --- LÓGICA AUTORITATIVA (NSD) ---
 def apply_authoritative(config):
     print(">>> Modo: AUTORITATIVO (NSD)")
-    
     os.makedirs(NSD_ZONES_DIR, exist_ok=True)
     
     bind_ips = config['settings'].get('bind_ip', '0.0.0.0').split()
@@ -155,15 +178,11 @@ def apply_authoritative(config):
             f.write("remote-control:\n  control-enable: yes\n  control-interface: 127.0.0.1\n\n")
             
             for z in zonas:
-                # CORREÇÃO: Sanitização do nome do arquivo da zona
-                # 1. Remove ponto final (evita ..zone)
-                # 2. Troca / por _ (evita erro de diretório em CIDR como 192.168.0.0/24)
                 safe_filename = z['nome'].strip('.').replace('/', '_') + ".zone"
                 f.write(f"zone:\n  name: \"{z['nome']}\"\n  zonefile: \"{safe_filename}\"\n")
-    except Exception as e: print(f"Erro escrita nsd.conf: {e}")
+    except Exception as e: print(f"Erro nsd.conf: {e}")
 
     for z in zonas:
-        # Aplica a mesma sanitização aqui para criar o arquivo
         safe_filename = z['nome'].strip('.').replace('/', '_') + ".zone"
         zfile = os.path.join(NSD_ZONES_DIR, safe_filename)
         try:
@@ -174,14 +193,12 @@ def apply_authoritative(config):
                 f.write(f"  IN NS ns1.{z['nome']}.\n  IN NS ns2.{z['nome']}.\n\n")
                 
                 for reg in z['registros']:
-                    h = reg['host']
+                    h = reg['host']; v = reg['valor']
                     if h == '@': h = ''
-                    v = reg['valor']
                     if reg['tipo'] in ['CNAME', 'NS', 'PTR'] and not v.endswith('.'): v += '.'
                     f.write(f"{h}\tIN\t{reg['tipo']}\t{v}\n")
-        except Exception as e: print(f"Erro escrita zona {z['nome']}: {e}")
+        except Exception as e: print(f"Erro zona {z['nome']}: {e}")
 
-    # SECURITY FIX: Timeouts added
     subprocess.run(['systemctl', 'enable', 'nsd'], capture_output=True, timeout=30)
     subprocess.run(['systemctl', 'restart', 'nsd'], capture_output=True, timeout=30)
     print("NSD recarregado.")
@@ -199,27 +216,25 @@ def write_new_state(state_data):
 
 def main_loop():
     base_name = os.path.basename(CONFIG_FILE)
-    with Mbox(f"Sentinela-Agente Iniciado ({base_name})"): pass
+    with Mbox(f"Sentinela-Agente v4.0 Iniciado ({base_name})"): pass
     
-    # SECURITY FIX: Circuit Breaker / Backoff
     fail_count = 0
-    MAX_BACKOFF = 300  # 5 minutes max
+    MAX_BACKOFF = 300
 
     while True:
         try:
             api_url, api_key = read_config()
             if not api_url: 
-                time.sleep(POLL_INTERVAL)
-                continue
+                time.sleep(POLL_INTERVAL); continue
             
             print("Verificando API...")
             remote = fetch_remote_config(api_url, api_key)
             
             if remote:
-                # Success - reset backoff
                 fail_count = 0
-                
                 current = get_current_state()
+                
+                # Prepara comparação (ignora cache local para diff)
                 r_clean = remote.copy()
                 if 'cached_ext_list' in r_clean: del r_clean['cached_ext_list']
                 c_clean = current.copy() if current else {}
@@ -230,15 +245,12 @@ def main_loop():
                 else:
                     mode = remote.get('mode')
                     if mode == 'recursive':
-                        # SECURITY FIX: Timeout
                         subprocess.run(['systemctl', 'start', 'unbound'], capture_output=True, timeout=30)
                         apply_recursive(remote)
                     elif mode == 'authoritative':
                         apply_authoritative(remote)
-                    
                     write_new_state(remote)
             else:
-                # API failure logic
                 fail_count += 1
                 backoff = min(POLL_INTERVAL * (2 ** (fail_count - 1)), MAX_BACKOFF)
                 print(f"Falha na API. Tentativa {fail_count}. Aguardando {backoff}s...")
@@ -246,14 +258,9 @@ def main_loop():
                 continue
 
         except KeyboardInterrupt:
-            print("\nParando agente...")
-            sys.exit(0)
+            print("\nParando..."); sys.exit(0)
         except Exception as e: 
-            print(f"Erro crítico no loop: {e}")
-            fail_count += 1
-            backoff = min(POLL_INTERVAL * (2 ** (fail_count - 1)), MAX_BACKOFF)
-            time.sleep(backoff)
-            continue
+            print(f"Erro crítico no loop: {e}"); time.sleep(60)
             
         time.sleep(POLL_INTERVAL)
 
