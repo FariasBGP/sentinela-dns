@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Sentinela-DNS — install.sh (v4.5 Stable & Fixes)
+# Sentinela-DNS — install.sh (v4.7 Production Ready)
 # Instala seletivamente: DNS, Flow e Monitoramento.
+# GERA TODOS OS SCRIPTS E CONFIGURAÇÕES DE LOG AUTOMATICAMENTE.
 
 set -euo pipefail
 
@@ -21,7 +22,7 @@ GOFLOW2_VERSION="${GOFLOW2_VERSION:-2.2.3}"
 PROM_URL="${PROM_URL:-http://localhost:9090}"
 API_URL_DEFAULT="https://api-sentinela.bgpconsultoria.com.br/api/v1/config"
 
-# Variáveis de Controle (Padrão) - Evita erro 'unbound variable'
+# Variáveis de Controle
 GRAFANA_INSTALL="yes"
 PROM_INSTALL="yes"
 NODE_EXPORTER_INSTALL="yes"
@@ -32,7 +33,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # ===== WIZARD DE SELEÇÃO =====
 echo ""
 echo "=================================================================="
-echo "  INSTALADOR SENTINELA-DNS v4.5 (Stable Fixes)"
+echo "  INSTALADOR SENTINELA-DNS v4.7 (Production Ready)"
 echo "=================================================================="
 echo "Selecione os componentes para instalar neste servidor."
 echo ""
@@ -49,11 +50,9 @@ OPT_FLOW=${OPT_FLOW:-N}
 read -p ">> Instalar Stack Monitoramento (Prometheus + Grafana)? [S/n]: " OPT_MON
 OPT_MON=${OPT_MON:-S}
 
-# Atualiza variáveis baseado na escolha do usuário
 if [[ ! "$OPT_MON" =~ ^[Ss] ]]; then
     GRAFANA_INSTALL="no"
     PROM_INSTALL="no"
-    # Node Exporter mantemos pois é útil para debug geral
 fi
 
 echo ""
@@ -133,7 +132,6 @@ server:
   access-control: 0.0.0.0/0 deny
   access-control: ::/0 deny
 EOF
-    # CORREÇÃO DE SINTAXE: Cada diretiva em uma linha separada
     cat >/etc/unbound/unbound.conf.d/61-configs.conf <<'EOF'
 server:
   outgoing-range: 8192
@@ -158,6 +156,16 @@ server:
   do-udp: yes
   do-tcp: yes
 EOF
+    
+    # --- LOGGING (CORREÇÃO VITAL PARA O NXDOMAIN) ---
+    cat >/etc/unbound/unbound.conf.d/90-logging.conf <<'EOF'
+server:
+  # Essencial para o script top-nxdomain funcionar
+  log-queries: yes
+  log-replies: yes
+  use-syslog: yes
+EOF
+
     cat >/etc/unbound/unbound.conf.d/20-dnssec.conf <<'EOF'
 server:
   auto-trust-anchor-file: "/var/lib/unbound/root.key"
@@ -187,7 +195,6 @@ EOF
       chown unbound:unbound /etc/unbound/unbound_{server,control}.{key,pem}
     fi
 
-    # Systemd Override Unbound
     install -d -m 0755 /etc/systemd/system/unbound.service.d
     cat >/etc/systemd/system/unbound.service.d/override.conf <<'EOF'
 [Service]
@@ -198,7 +205,7 @@ ExecStart=/usr/sbin/unbound -d $DAEMON_OPTS
 EOF
     systemctl daemon-reload
     systemctl enable unbound; systemctl restart unbound
-    ok "Unbound configurado."
+    ok "Unbound configurado (com logs ativos)."
 
     # --- Unbound Exporter ---
     if ! command -v unbound_exporter >/dev/null 2>&1; then
@@ -220,27 +227,107 @@ WantedBy=multi-user.target
 EOF
     systemctl enable --now unbound_exporter
 
-    # --- Scripts Auxiliares DNS (CORRIGIDO) ---
-    if [[ -f "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" ]]; then
-      install -m 0755 "${REPO_ROOT}/scripts/top-nxdomain-optimized.sh" /usr/local/bin/top-nxdomain-optimized.sh
-      ok "Script top-nxdomain-optimized.sh instalado."
-    elif [[ -f "${REPO_ROOT}/tools/top-nxdomain.sh" ]]; then
-      # Fallback
-      install -m 0755 "${REPO_ROOT}/tools/top-nxdomain.sh" /usr/local/bin/top-nxdomain.sh
-      warn "Usando versão legada do top-nxdomain.sh"
-    fi
+    # --- Coletor NXDOMAIN (Criação INLINE) ---
+    inf "Criando script de métricas NXDOMAIN..."
+    cat > /usr/local/bin/top-nxdomain-optimized.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C LANG=C
+umask 022
+
+WINDOW="${1:-12h}"
+TOPN="${2:-20}"
+OUTDIR="/var/lib/node_exporter/textfile_collector"
+OUT="${OUTDIR}/sentinela_nxdomain.prom"
+TMP="${OUT}.tmp.$$"
+
+mkdir -p "$OUTDIR"
+chown prometheus:prometheus "$OUTDIR" || true
+chmod 755 "$OUTDIR" || true
+
+total_nxdomain() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' | wc -l | tr -d ' ' || echo 0
+}
+
+top_ips() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' \
+    | awk '/info:/ {print $8}' \
+    | sort | uniq -c | sort -nr | head -"$TOPN" || true
+}
+
+top_domains() {
+  journalctl -u unbound -S -"${WINDOW}" --lines=100000 --no-pager 2>/dev/null | grep ' IN NXDOMAIN ' \
+    | awk '/info:/ {sub(/\.$/,"",$9); print $9}' \
+    | sort | uniq -c | sort -nr | head -"$TOPN" || true
+}
+
+top_ips > "${TMP}.ips" &
+top_domains > "${TMP}.doms" &
+TOTAL="$(total_nxdomain)"
+wait
+
+IPS="$(cat "${TMP}.ips")"
+DOMS="$(cat "${TMP}.doms")"
+rm -f "${TMP}.ips" "${TMP}.doms"
+
+{
+  echo "# HELP sentinela_nxdomain_total Total de respostas NXDOMAIN"
+  echo "# TYPE sentinela_nxdomain_total gauge"
+  echo "sentinela_nxdomain_total{window=\"${WINDOW}\"} ${TOTAL}"
+  echo
+  echo "# HELP sentinela_nxdomain_ip_count Top IPs NXDOMAIN"
+  echo "# TYPE sentinela_nxdomain_ip_count gauge"
+  if [ -n "${IPS}" ]; then
+    while read -r c ip; do
+      [ -z "${ip}" ] && continue
+      echo "sentinela_nxdomain_ip_count{ip=\"${ip}\",window=\"${WINDOW}\"} ${c}"
+    done <<< "$IPS"
+  fi
+  echo
+  echo "# HELP sentinela_nxdomain_domain_count Top Domínios NXDOMAIN"
+  echo "# TYPE sentinela_nxdomain_domain_count gauge"
+  if [ -n "${DOMS}" ]; then
+    while read -r c dom; do
+      [ -z "${dom}" ] && continue
+      dom_esc="${dom//\\/\\\\}"
+      dom_esc="${dom_esc//\"/\\\"}"
+      echo "sentinela_nxdomain_domain_count{domain=\"${dom_esc}\",window=\"${WINDOW}\"} ${c}"
+    done <<< "$DOMS"
+  fi
+} > "$TMP"
+
+install -m 0644 "$TMP" "$OUT"
+chown prometheus:prometheus "$OUT" || true
+rm -f "$TMP"
+EOF
+    chmod +x /usr/local/bin/top-nxdomain-optimized.sh
+    ok "Script NXDOMAIN criado."
+
+    # Services NXDOMAIN (Criação INLINE)
+    cat > /etc/systemd/system/top-nxdomain.service <<'EOF'
+[Unit]
+Description=Gera métricas NXDOMAIN (textfile collector)
+Wants=network-online.target
+After=network-online.target unbound.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/top-nxdomain-optimized.sh 12h 20
+EOF
     
-    if [[ -f "${REPO_ROOT}/tools/top-talkers.sh" ]]; then
-      install -m 0755 "${REPO_ROOT}/tools/top-talkers.sh" /usr/local/bin/top-talkers.sh
-    fi
-    
-    # Timers Systemd (Ajuste para chamar o script correto)
-    if [[ -f "${REPO_ROOT}/systemd/top-nxdomain.service" ]]; then
-        install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.service" /etc/systemd/system/
-        install -m 0644 "${REPO_ROOT}/systemd/top-nxdomain.timer" /etc/systemd/system/
-        systemctl daemon-reload
-        systemctl enable --now top-nxdomain.timer
-    fi
+    cat > /etc/systemd/system/top-nxdomain.timer <<'EOF'
+[Unit]
+Description=Executa o coletor de métricas NXDOMAIN a cada 10 minutos
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+Unit=top-nxdomain.service
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now top-nxdomain.timer
+    ok "Coletor NXDOMAIN agendado."
 
     # --- Agente Sentinela (Recursivo/Auth) ---
     inf "Configurando Agente..."
@@ -339,7 +426,6 @@ if [[ "$OPT_FLOW" =~ ^[Ss] ]]; then
 
     GOFLOW_URL="https://github.com/netsampler/goflow2/releases/download/v${GOFLOW2_VERSION}/goflow2-${GOFLOW2_VERSION}-linux-x86_64"
     
-    # FIX: Para serviço antes de baixar para evitar 'Text file busy'
     if systemctl is-active --quiet sentinela-flow; then
         inf "Parando serviço sentinela-flow para atualização..."
         systemctl stop sentinela-flow
@@ -368,12 +454,7 @@ EOF
         ok "Módulo Flow ativo na porta 2055."
         
         # Script Analisador
-        if [[ -f "${REPO_ROOT}/tools/flow-analyzer.sh" ]]; then
-            install -m 0755 "${REPO_ROOT}/tools/flow-analyzer.sh" /usr/local/bin/flow-analyzer.sh
-        elif [[ -f "/usr/local/bin/flow-analyzer.sh" ]]; then
-             ok "Analisador já presente."
-        else
-             cat > /usr/local/bin/flow-analyzer.sh <<'EOF'
+        cat > /usr/local/bin/flow-analyzer.sh <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 LOG_FILE="/var/log/goflow.log"
@@ -397,8 +478,7 @@ chmod 644 "$OUT_FILE"
 if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE") -ge 104857600 ]; then truncate -s 0 "$LOG_FILE"; fi
 EOF
              chmod +x /usr/local/bin/flow-analyzer.sh
-             ok "Analisador criado (fallback)."
-        fi
+             ok "Analisador criado."
 
         cat > /etc/systemd/system/sentinela-threats.service <<EOF
 [Unit]
@@ -436,7 +516,6 @@ if [[ "$OPT_MON" =~ ^[Ss] ]]; then
     inf "Instalando Stack de Monitoramento..."
     apt-get install -y prometheus
 
-    # CORREÇÃO: Criação do prometheus.yml com sintaxe válida e modular
     cat > "/etc/prometheus/prometheus.yml" <<EOF
 global:
   scrape_interval: 15s
@@ -451,7 +530,6 @@ scrape_configs:
       - targets: ['localhost:9100']
 EOF
 
-    # Adiciona jobs condicionais
     if [[ "$OPT_DNS" =~ ^[Ss] ]]; then
         cat >> "/etc/prometheus/prometheus.yml" <<EOF
   - job_name: 'unbound'
