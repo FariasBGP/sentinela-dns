@@ -786,3 +786,24 @@ providers:
     options:
       path: /var/lib/grafana/dashboards/unbound
 EOF
+
+        # Se houver dashboards, poderia baixar aqui, mas sem git vamos pular essa cópia de arquivos complexos
+        # ou embuti-los se fossem críticos. O essencial (DataSource) está configurado.
+        
+        BRANDING_DIR="${REPO_ROOT}/branding"
+        GRAFANA_IMG_DIR="/usr/share/grafana/public/img"
+        if [[ -f "${BRANDING_DIR}/logo.jpg" ]]; then
+            cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_logo.svg"
+            cp "${BRANDING_DIR}/logo.jpg" "${GRAFANA_IMG_DIR}/grafana_icon.svg"
+        fi
+
+        chown -R grafana:grafana /etc/grafana /var/lib/grafana /var/log/grafana
+        chmod -R 755 /etc/grafana /var/lib/grafana /var/log/grafana
+        systemctl enable --now grafana-server
+        ok "Grafana ativo."
+    fi
+else
+    inf "Monitoramento local ignorado."
+fi
+
+ok "Instalação Finalizada com Sucesso!"
